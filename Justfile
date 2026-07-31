@@ -10,12 +10,12 @@ demozoo_export:
 
 bitworld: pages
     ./bitworld_gen.py -o bitworld.txt 1 111667
-    gzip bitworld.txt
+    gzip -f bitworld.txt
 
 csdb: csdb_cache
     ./csdb.py
-    gzip csdb.txt
+    gzip -f csdb.txt
 
 demozoo: demozoo_export
     ./demozoo.py
-    gzip demozoo.txt
+    gzip -f demozoo.txt
