@@ -403,7 +403,7 @@ def export(conn, out_path):
         # A graphics entry is the work of the artist who drew it, so credit
         # them; demos and music keep the group byline.  An entry credited to
         # a group alone still falls back to that group.
-        if supertype == "graphics":
+        if supertype == "graphics" or supertype == "music" :
             return person_string(prod_id) or group_string(prod_id)
         return group_string(prod_id)
 
