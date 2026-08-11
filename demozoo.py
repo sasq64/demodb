@@ -10,6 +10,8 @@ Demozoo covers every platform, so unlike the single-platform bitworld.txt and
 csdb.txt there is no `# Platform:` header — each line names its own platform.
 Only the platforms in PLATFORM_WHITELIST are exported, and releases whose only
 downloads have a blacklisted extension (see DOWNLOAD_BLACKLIST) are dropped.
+Graphics and music for which Demozoo records no platform at all are still
+exported, with an empty platform field (see PLATFORMLESS_SUPERTYPES).
 
 Usage:
     python demozoo.py --sql demozoo-export.sql --db demozoo.sqlite \
@@ -92,7 +94,8 @@ PLATFORM_NAMES = {
 # *demarc* platform name, i.e. the right-hand side of PLATFORM_NAMES — so
 # "Amiga*" covers Amiga, Amiga AGA and Amiga PPC in one pattern.  Platforms
 # that match nothing are stripped from the platform field, and a release left
-# without any platform is not exported.
+# without any platform is not exported — except for the platformless graphics
+# and music described at PLATFORMLESS_SUPERTYPES.
 #
 # DOWNLOAD_BLACKLIST is matched against the lower-cased URL with any query
 # string removed, so the patterns are effectively extensions.  ('#' is left
@@ -118,6 +121,14 @@ PLATFORM_WHITELIST = [
     "NEO GEO",
 
 ]
+
+# Demozoo only really insists on a platform for executable prods; for graphics
+# and music it is optional, and some 116k such entries carry no platform row at
+# all (as opposed to one we filtered out).  Dropping everything platformless
+# would therefore throw away most of Demozoo's pictures and tunes, so entries of
+# these supertypes are kept when they have a usable download, and exported with
+# an empty `platform:` field — a `-I platform:...` filter will not match them.
+PLATFORMLESS_SUPERTYPES = {"graphics", "music"}
 
 DOWNLOAD_BLACKLIST = [
     "*.php",
@@ -530,6 +541,7 @@ def export(conn, out_path):
     n = 0
     skipped_platform = 0
     skipped_download = 0
+    platformless = 0
     # Same reasoning as the db: write beside out_path and rename, so a run that
     # produces nothing (an empty or truncated db read back with --skip-load)
     # cannot replace a good export with an empty file for `just demozoo` to
@@ -543,11 +555,20 @@ def export(conn, out_path):
         for prod_id, title, date, precision, supertype in cur.execute(
                 "SELECT id, title, release_date_date, release_date_precision, "
                 "supertype FROM productions_production ORDER BY id"):
-            platforms = [platform_name[p] for p in prod_platforms.get(prod_id, [])
+            raw_platforms = prod_platforms.get(prod_id, [])
+            platforms = [platform_name[p] for p in raw_platforms
                          if p in platform_name]
             if not platforms:
-                skipped_platform += 1
-                continue
+                # No platform *at all* is Demozoo not recording one (normal for
+                # graphics and music); a platform we filtered out is a machine
+                # we deliberately do not export, so that one still goes.  The
+                # url check keeps out the platformless entries demarc could not
+                # do anything with anyway.
+                if (raw_platforms or supertype not in PLATFORMLESS_SUPERTYPES
+                        or prod_id not in prod_urls):
+                    skipped_platform += 1
+                    continue
+                platformless += 1
             if prod_id in blacklisted:
                 skipped_download += 1
                 continue
@@ -582,7 +603,8 @@ def export(conn, out_path):
     os.replace(tmp_path, out_path)
 
     print(f"Wrote {n} releases to {out_path} "
-          f"(skipped {skipped_platform} off-whitelist platforms, "
+          f"({platformless} of them without a platform; skipped "
+          f"{skipped_platform} off-whitelist platforms, "
           f"{skipped_download} blacklisted downloads)", file=sys.stderr)
 
 
