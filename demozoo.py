@@ -8,6 +8,8 @@ one bitworld.txt and csdb.txt use:
 
 Demozoo covers every platform, so unlike the single-platform bitworld.txt and
 csdb.txt there is no `# Platform:` header — each line names its own platform.
+Only the platforms in PLATFORM_WHITELIST are exported, and releases whose only
+downloads have a blacklisted extension (see DOWNLOAD_BLACKLIST) are dropped.
 
 Usage:
     python demozoo.py --sql demozoo-export.sql --db demozoo.sqlite \
@@ -18,9 +20,11 @@ an existing SQLite database and only regenerate the export (much faster).
 """
 
 import argparse
+import os
 import sqlite3
 import sys
 import time
+from fnmatch import fnmatchcase
 
 # ---------------------------------------------------------------------------
 # Which tables (and which of their columns) we pull out of the pg_dump.
@@ -82,6 +86,61 @@ PLATFORM_NAMES = {
 }
 
 # ---------------------------------------------------------------------------
+# What gets exported at all.
+#
+# PLATFORM_WHITELIST is matched (case-sensitively, as a glob) against the
+# *demarc* platform name, i.e. the right-hand side of PLATFORM_NAMES — so
+# "Amiga*" covers Amiga, Amiga AGA and Amiga PPC in one pattern.  Platforms
+# that match nothing are stripped from the platform field, and a release left
+# without any platform is not exported.
+#
+# DOWNLOAD_BLACKLIST is matched against the lower-cased URL with any query
+# string removed, so the patterns are effectively extensions.  ('#' is left
+# alone: it is a literal character in plenty of these unencoded file names,
+# e.g. modland's ".../XTD/## crimple ##.mod".)
+# demarc runs what it downloads; a bare .mod or a video capture is not a
+# release you can run.  Such urls are dropped, and a release whose downloads
+# are *all* dropped goes with them.
+# ---------------------------------------------------------------------------
+PLATFORM_WHITELIST = [
+    "Amiga*",
+    "Atari*",
+    "C64*",
+    "C16",
+    "Megadrive",
+    "SNES",
+    "Gameboy*",
+    "GBA",
+    "PlayStation",
+    "Tic-80",
+    "ZX Spectrum",
+    "Amstrad*",
+    "NEO GEO",
+
+]
+
+DOWNLOAD_BLACKLIST = [
+    "*.php",
+    "*.ogg",
+    "*.mp4",
+    "*.avi",
+    "*.wmv",
+    "*.pdf",
+    "*.wav",
+    "*.ogg",
+    "*.4q",
+]
+
+
+def platform_allowed(name):
+    return any(fnmatchcase(name, pat) for pat in PLATFORM_WHITELIST)
+
+
+def download_allowed(url):
+    path = url.split("?", 1)[0].lower()
+    return not any(fnmatchcase(path, pat) for pat in DOWNLOAD_BLACKLIST)
+
+# ---------------------------------------------------------------------------
 # URL resolution.  A Demozoo productionlink stores a link_class plus a
 # parameter; the real URL is reconstructed from a per-class template.  We
 # implement the common ones.  `{p}` is the (stripped) parameter.
@@ -95,10 +154,13 @@ PLATFORM_NAMES = {
 # ---------------------------------------------------------------------------
 URL_TEMPLATES = {
     "BaseUrl": "{p}",
-    "AmigascneFile": "http://ftp.amigascne.org/pub/amiga{p}",
-    "SceneOrgFile": "https://files.scene.org/get{p}",
-    "ModlandFile": "https://ftp.modland.com/pub/modules{p}",
-    "FujiologyFile": "https://ftp.untergrund.net/users/ltk_tscl/fujiology{p}",
+     # https://files.scene.org/get:fi-ftp/mirrors/amigascne/Gfx/G/Gabi/1996/Floppy-Embraced%20(8bpl).png
+    #"AmigascneFile": "http://ftp.amigascne.org/pub/amiga{p}",
+    "AmigascneFile": "https://files.scene.org/get:fi-ftp/mirrors/amigascne{p}",
+    "# SceneOrgFile": "https://files.scene.org/get{p}",
+    "SceneOrgFile": "https://files.scene.org/get:de-https{p}",
+    "ModlandFile": "https://ftp.modland.com{p}",
+    "FujiologyFile": "https://ftp.untergrund.net/users/ltk_tscc/fujiology{p}",
     "UntergrundFile": "https://ftp.untergrund.net{p}",
     "PaduaOrgFile": "http://ftp.padua.org/pub/c64{p}",
     "Defacto2File": "https://defacto2.net/f/{p}",
@@ -118,11 +180,50 @@ URL_PRIORITY = [
 URL_RANK = {cls: i for i, cls in enumerate(URL_PRIORITY)}
 
 
+# ---------------------------------------------------------------------------
+# URL rewrites, applied to every resolved url as `(pattern, replacement)`
+# pairs.  A trailing `*` in the pattern matches any suffix, which is then
+# substituted for the `*` in the replacement; the first matching rule wins.
+#
+# These fix up links that are correct as Demozoo records them but awkward to
+# download: they point at a redirect, a dead host name, or a doubled path
+# prefix.  demarc used to do this at download time, so it also had to do it for
+# urls it never generated; doing it here means the exported db already holds the
+# url that works, at the cost of needing a regenerate if a mirror moves.
+#
+#   scene.org  a `/get/` link 302-redirects to a slow FTP mirror; the
+#              `/get:de-https/` variant serves the file straight over HTTPS.
+#   modland    some parameters already carry the `/pub/modules` prefix the
+#              template adds, giving a doubled path.
+#   untergrund the fujiology archive moved from the ltk_tscl user dir to
+#              ltk_tscc.
+#   sndh       plain http no longer serves files.
+# ---------------------------------------------------------------------------
+URL_REWRITES = [
+    ("https://files.scene.org/get/*", "https://files.scene.org/get:de-https/*"),
+    ("https://ftp.modland.com/pub/modules/pub/modules/*",
+     "https://ftp.modland.com/pub/modules/*"),
+    ("https://ftp.untergrund.net/users/ltk_tscl/*",
+     "https://ftp.untergrund.net/users/ltk_tscc/*"),
+    ("http://sndh.atari.org/*", "https://sndh.atari.org/*"),
+]
+
+
+def translate_url(url):
+    """Apply the first matching URL_REWRITES rule, else return url unchanged."""
+    for pattern, replacement in URL_REWRITES:
+        if pattern.endswith("*") and replacement.endswith("*"):
+            prefix = pattern[:-1]
+            if url.startswith(prefix):
+                return replacement[:-1] + url[len(prefix):]
+    return url
+
+
 def resolve_url(link_class, parameter):
     tmpl = URL_TEMPLATES.get(link_class)
     if tmpl is None:
         return None
-    return tmpl.replace("{p}", parameter.strip())
+    return translate_url(tmpl.replace("{p}", parameter.strip()))
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +257,17 @@ def unescape(value):
 
 
 def load_database(sql_path, db_path):
-    conn = sqlite3.connect(db_path)
+    # Build into a scratch file and move it into place only once the load has
+    # committed.  journal_mode=OFF below trades the rollback journal for speed,
+    # so a load interrupted part-way (Ctrl-C, OOM) cannot be rolled back: were
+    # we writing db_path directly it would be left with the previous build
+    # dropped, half the tables empty and its freelist inconsistent -- and, being
+    # a perfectly openable file, every later --skip-load run would read it as if
+    # it were good and export nothing.  Renaming makes the db valid or absent.
+    tmp_path = db_path + ".tmp"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+    conn = sqlite3.connect(tmp_path)
     conn.execute("PRAGMA journal_mode=OFF")
     conn.execute("PRAGMA synchronous=OFF")
     cur = conn.cursor()
@@ -222,7 +333,9 @@ def load_database(sql_path, db_path):
 
     build_indexes(cur)
     conn.commit()
-    return conn
+    conn.close()
+    os.replace(tmp_path, db_path)
+    return sqlite3.connect(db_path)
 
 
 def build_indexes(cur):
@@ -280,9 +393,11 @@ def scalar_maps(cur):
     ptype_name = {}
     for pid, name in cur.execute("SELECT id, name FROM productions_productiontype"):
         ptype_name[pid] = name
-    platform_name = {}
+    platform_name = {}  # whitelisted platforms only; others are absent
     for pid, name in cur.execute("SELECT id, name FROM platforms_platform"):
-        platform_name[pid] = PLATFORM_NAMES.get(name, name)
+        name = PLATFORM_NAMES.get(name, name)
+        if platform_allowed(name):
+            platform_name[pid] = name
     party_name = {}
     for pid, name in cur.execute("SELECT id, name FROM parties_party"):
         party_name[pid] = name
@@ -356,14 +471,19 @@ def export(conn, out_path):
             prod_links.setdefault(prod_id, []).append((rank, url))
 
     prod_urls = {}
+    blacklisted = set()  # had downloads, but every one of them was blacklisted
     for prod_id, links in prod_links.items():
         seen = set()
         urls = []
         for _, url in sorted(links, key=lambda l: l[0]):
             if url not in seen:
                 seen.add(url)
-                urls.append(url)
-        prod_urls[prod_id] = ";".join(urls)
+                if download_allowed(url):
+                    urls.append(url)
+        if urls:
+            prod_urls[prod_id] = ";".join(urls)
+        else:
+            blacklisted.add(prod_id)
 
     def join_names(names):
         # de-dupe, keep order; joined with ' & ' like bitworld bylines.
@@ -408,7 +528,14 @@ def export(conn, out_path):
         return group_string(prod_id)
 
     n = 0
-    with open(out_path, "w", encoding="utf-8") as out:
+    skipped_platform = 0
+    skipped_download = 0
+    # Same reasoning as the db: write beside out_path and rename, so a run that
+    # produces nothing (an empty or truncated db read back with --skip-load)
+    # cannot replace a good export with an empty file for `just demozoo` to
+    # gzip over the previous one.
+    tmp_path = out_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as out:
         # Prose comments, not a `key:value` header: Demozoo is multi-platform,
         # so the platform is per line rather than set once for the whole file.
         out.write("# Demozoo release database (https://demozoo.org/)\n")
@@ -416,16 +543,21 @@ def export(conn, out_path):
         for prod_id, title, date, precision, supertype in cur.execute(
                 "SELECT id, title, release_date_date, release_date_precision, "
                 "supertype FROM productions_production ORDER BY id"):
+            platforms = [platform_name[p] for p in prod_platforms.get(prod_id, [])
+                         if p in platform_name]
+            if not platforms:
+                skipped_platform += 1
+                continue
+            if prod_id in blacklisted:
+                skipped_download += 1
+                continue
             fields = [
                 ("id", str(prod_id)),
                 ("title", title or ""),
                 ("author", author_string(prod_id, supertype)),
                 ("date", fmt_date(date, precision)),
                 ("party", party_name.get(prod_party.get(prod_id), "") or ""),
-                ("platform", ";".join(
-                    platform_name.get(p, "") for p in prod_platforms.get(prod_id, [])
-                    if platform_name.get(p)
-                )),
+                ("platform", ";".join(platforms)),
                 ("category", ";".join(
                     ptype_name.get(t, "") for t in prod_types.get(prod_id, [])
                     if ptype_name.get(t)
@@ -439,7 +571,19 @@ def export(conn, out_path):
             out.write("\t".join(f"{key}:{clean(val)}" for key, val in fields) + "\n")
             n += 1
 
-    print(f"Wrote {n} releases to {out_path}", file=sys.stderr)
+    if n == 0:
+        os.remove(tmp_path)
+        raise SystemExit(
+            f"error: no releases to export -- {skipped_platform} productions "
+            f"were off-whitelist and {skipped_download} had only blacklisted "
+            f"downloads.  If all three counts are zero the database is empty; "
+            f"rebuild it without --skip-load."
+        )
+    os.replace(tmp_path, out_path)
+
+    print(f"Wrote {n} releases to {out_path} "
+          f"(skipped {skipped_platform} off-whitelist platforms, "
+          f"{skipped_download} blacklisted downloads)", file=sys.stderr)
 
 
 def main(argv=None):
