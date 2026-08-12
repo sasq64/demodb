@@ -13,6 +13,12 @@ downloads have a blacklisted extension (see DOWNLOAD_BLACKLIST) are dropped.
 Graphics and music for which Demozoo records no platform at all are still
 exported, with an empty platform field (see PLATFORMLESS_SUPERTYPES).
 
+A release that Demozoo links to a pouet.net prod appearing in one of the
+per-platform toplists also gets a `pouet:<cncds>,<thumbs>` field.  The toplist
+pages are fetched at startup and cached under .pouet_cache, so only the first
+run needs the network; --refresh-pouet refetches them and --no-pouet skips the
+whole step.
+
 Usage:
     python demozoo.py --sql demozoo-export.sql --db demozoo.sqlite \
         --out demozoo.txt
@@ -22,11 +28,14 @@ an existing SQLite database and only regenerate the export (much faster).
 """
 
 import argparse
+from dataclasses import dataclass
 import os
+import re
 import sqlite3
 import sys
 import time
 from fnmatch import fnmatchcase
+from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
 # Which tables (and which of their columns) we pull out of the pg_dump.
@@ -86,6 +95,141 @@ PLATFORM_NAMES = {
     "TIC-80": "Tic-80",
     "PICO-8": "Pico8",
 }
+
+POUET_IDS = {
+    "C64": 76,
+    "Amiga": 73,
+    "Amiga AGA": 71,
+    "Atari ST": 70,
+    "Atari STe": 72, # NOTE: joined with ST for demarc
+    "PlayStation": 75,
+    "Gameboy": 81,
+    "Gameboy Color": 86,
+    "GBA": 85,
+    "Megadrive": 89,
+    "Atari 2600": 117,
+    "Amstrad CPC": 78,
+    "Atari XL": 109,
+}
+
+POUET_TOPLIST_URL = "https://www.pouet.net/toplist.php?type=&platform={id}&limit=64"
+
+# Toplist pages are fetched once and kept here; delete the directory (or pass
+# --refresh-pouet) to pick up newer vote counts.  A cached copy also means a
+# rebuild works offline and does not hammer pouet.net once per platform.
+POUET_CACHE_DIR = ".pouet_cache"
+
+@dataclass
+class PouetData:
+    id: int
+    thumbs: int
+    cncd_count: int
+
+
+_PROD_ID_RE = re.compile(r"prod\.php\?which=(\d+)")
+_LEADING_INT_RE = re.compile(r"\d+")
+
+
+def _leading_int(text):
+    """First integer in `text` ('18 CDCs' -> 18), or 0 if there is none."""
+    if not text:
+        return 0
+    m = _LEADING_INT_RE.search(text)
+    return int(m.group()) if m else 0
+
+
+def fetch_page(url):
+    """GET `url` as text.  Pouet 403s the default urllib agent, so pose as a
+    browser the way bitworld_scrape.py does."""
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=60) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def parse_toplist(html: str) -> list[PouetData]:
+    """Pull the release rows out of a Pouet toplist page.
+
+    The list is a single <ul class='boxlist boxlisttable'>, one <li> per
+    release, holding the three things we want:
+
+        <span class='prod'><a href='prod.php?which=25778'>Starstruck</a></span>
+        <div class='cdcstack' title='18 CDCs'>...</div>
+        <span class='toplist rulez'>576</span>
+
+    A release with no CDCs simply has no cdcstack div, which reads as 0.  Rows
+    without a prod link (there are none today, but the page also carries award
+    and group links) are skipped rather than guessed at.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    ul = soup.find("ul", class_="boxlisttable")
+    if ul is None:
+        return []
+
+    out = []
+    for li in ul.find_all("li", recursive=False):
+        link = li.select_one("span.prod a[href*='prod.php?which=']")
+        if link is None:
+            continue
+        m = _PROD_ID_RE.search(link["href"])
+        if not m:
+            continue
+        cdc = li.find("div", class_="cdcstack")
+        rulez = li.find("span", class_="rulez")
+        out.append(PouetData(
+            id=int(m.group(1)),
+            thumbs=_leading_int(rulez.get_text() if rulez else ""),
+            cncd_count=_leading_int(cdc.get("title") if cdc else ""),
+        ))
+    return out
+
+
+def toplist_html(platform_id, cache_dir=POUET_CACHE_DIR, refresh=False):
+    """The toplist page for one platform, from the disk cache if we have it."""
+    path = os.path.join(cache_dir, f"toplist-{platform_id}.html")
+    if not refresh and os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    html = fetch_page(POUET_TOPLIST_URL.format(id=platform_id))
+    os.makedirs(cache_dir, exist_ok=True)
+    # Same write-then-rename as everywhere else here: a half-written page left
+    # by an interrupted fetch would be cached as if it were the real thing.
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(html)
+    os.replace(tmp, path)
+    return html
+
+
+def populate_pouetdata(platform_id: int, cache_dir=POUET_CACHE_DIR,
+                       refresh=False) -> list[PouetData]:
+    """Fetch (or read back) the Pouet toplist for one platform id (POUET_IDS)."""
+    return parse_toplist(toplist_html(platform_id, cache_dir, refresh))
+
+
+def load_pouetdata(cache_dir=POUET_CACHE_DIR, refresh=False):
+    """{pouet prod id: PouetData} over every platform in POUET_IDS.
+
+    A prod that targets two of these platforms (an ST/STe release, say) is
+    listed once per platform with the same votes, so the first row wins.  A
+    platform whose page cannot be fetched is warned about and skipped rather
+    than failing the whole export -- the pouet field is an extra, not the point
+    of the file.
+    """
+    data = {}
+    for name, platform_id in POUET_IDS.items():
+        try:
+            rows = populate_pouetdata(platform_id, cache_dir, refresh)
+        except OSError as e:
+            print(f"  WARNING: no pouet toplist for {name}: {e}", file=sys.stderr)
+            continue
+        for row in rows:
+            data.setdefault(row.id, row)
+    print(f"Pouet toplists: {len(data)} releases", file=sys.stderr)
+    return data
+
+
 
 # ---------------------------------------------------------------------------
 # What gets exported at all.
@@ -427,7 +571,8 @@ def group_multimap(cur, table, key_col, val_col):
     return d
 
 
-def export(conn, out_path):
+def export(conn, out_path, pouet_data=None):
+    pouet_data = pouet_data or {}
     cur = conn.cursor()
     (nick_name, nick_releaser, is_group, ptype_name,
      platform_name, party_name, tag_name) = scalar_maps(cur)
@@ -467,11 +612,18 @@ def export(conn, out_path):
     # first entry (or, for a disk-image set, all of them), so ordering decides
     # what a release actually launches; the rest are fallbacks.
     prod_links = {}
+    prod_pouet_id = {}  # production -> the pouet prod it is linked to
     for prod_id, link_class, parameter, is_dl in cur.execute(
             "SELECT production_id, link_class, parameter, is_download_link "
             "FROM productions_productionlink"):
-        # Skip the external-link half of the table: those are pages about the
-        # release (Pouet, csdb, Youtube, ...), not the release itself.
+        # The external half of the table is pages *about* the release; the one
+        # we keep is the Pouet link, whose parameter is the pouet prod id and
+        # so is what ties a production to its toplist row.
+        if link_class == "PouetProduction":
+            if parameter and parameter.strip().isdigit():
+                prod_pouet_id.setdefault(prod_id, int(parameter))
+        # Skip the rest of the external links (csdb, Youtube, ...): they are not
+        # the release itself.
         if is_dl != "t":
             continue
         rank = URL_RANK.get(link_class)
@@ -539,6 +691,7 @@ def export(conn, out_path):
         return group_string(prod_id)
 
     n = 0
+    n_pouet = 0
     skipped_platform = 0
     skipped_download = 0
     platformless = 0
@@ -552,6 +705,8 @@ def export(conn, out_path):
         # so the platform is per line rather than set once for the whole file.
         out.write("# Demozoo release database (https://demozoo.org/)\n")
         out.write("# id title author date party platform category tags download\n")
+        out.write("# plus pouet:<cncds>,<thumbs> on releases that are in a "
+                  "pouet.net toplist\n")
         for prod_id, title, date, precision, supertype in cur.execute(
                 "SELECT id, title, release_date_date, release_date_precision, "
                 "supertype FROM productions_production ORDER BY id"):
@@ -589,6 +744,12 @@ def export(conn, out_path):
                 )),
                 ("download", prod_urls.get(prod_id, "")),
             ]
+            # Only the (few) releases that made a toplist carry this field, so
+            # its absence -- not an empty value -- means "not on the list".
+            pd = pouet_data.get(prod_pouet_id.get(prod_id))
+            if pd is not None:
+                fields.append(("pouet", f"{pd.cncd_count},{pd.thumbs}"))
+                n_pouet += 1
             out.write("\t".join(f"{key}:{clean(val)}" for key, val in fields) + "\n")
             n += 1
 
@@ -605,6 +766,7 @@ def export(conn, out_path):
     print(f"Wrote {n} releases to {out_path} "
           f"({platformless} of them without a platform; skipped "
           f"{skipped_platform} off-whitelist platforms, "
+          f"({n_pouet} with pouet data; skipped {skipped_platform} "
           f"{skipped_download} blacklisted downloads)", file=sys.stderr)
 
 
@@ -619,13 +781,23 @@ def main(argv=None):
                     help="output file (default: demozoo.txt)")
     ap.add_argument("--skip-load", action="store_true",
                     help="reuse an existing --db instead of rebuilding it")
+    ap.add_argument("--pouet-cache", default=POUET_CACHE_DIR,
+                    help=f"where toplist pages are cached "
+                         f"(default: {POUET_CACHE_DIR})")
+    ap.add_argument("--refresh-pouet", action="store_true",
+                    help="refetch the pouet toplists instead of using the cache")
+    ap.add_argument("--no-pouet", action="store_true",
+                    help="skip the pouet toplists (no pouet: field)")
     args = ap.parse_args(argv)
+
+    pouet_data = {} if args.no_pouet else load_pouetdata(
+        args.pouet_cache, args.refresh_pouet)
 
     if args.skip_load:
         conn = sqlite3.connect(args.db)
     else:
         conn = load_database(args.sql, args.db)
-    export(conn, args.out)
+    export(conn, args.out, pouet_data)
     conn.close()
 
 

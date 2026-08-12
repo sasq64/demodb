@@ -10,12 +10,15 @@ demozoo_export:
 
 bitworld: pages
     ./bitworld_gen.py -o bitworld.txt 1 111667
-    gzip -f bitworld.txt
 
 csdb: csdb_cache
     ./csdb.py
-    gzip -f csdb.txt
 
 demozoo: demozoo_export
     ./demozoo.py
+
+
+export:
+    gzip -f csdb.txt
     gzip -f demozoo.txt
+    cp *.gz ../docs/minnberg/static/dl
