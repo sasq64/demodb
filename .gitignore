@@ -1,0 +1,7 @@
+/*.txt.gz
+/*.txt
+demozoo-export.sql
+.csdb_cache/
+.pouet_cache/
+pages/
+demozoo.sqlite

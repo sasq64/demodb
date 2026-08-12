@@ -19,6 +19,6 @@ demozoo: demozoo_export
 
 
 export:
-    gzip -f csdb.txt
-    gzip -f demozoo.txt
-    cp *.gz ../docs/minnberg/static/dl
+    gzip -k -f csdb.txt
+    gzip -k -f demozoo.txt
+    mv csdb.txt.gz demozoo.txt.gz ../docs/minnberg/static/dl
