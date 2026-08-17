@@ -254,8 +254,12 @@ def load_pouetdata(cache_dir=POUET_CACHE_DIR, refresh=False):
 # are *all* dropped goes with them.
 # ---------------------------------------------------------------------------
 PLATFORM_WHITELIST = [
+    "Amiga AGA",
+    "Amiga OCS*",
     "Amiga*",
-    "Atari*",
+    "Atari ST*",
+    "Atari 8*",
+    "Atari 2600",
     "C64*",
     "C16",
     "Megadrive",
@@ -266,7 +270,7 @@ PLATFORM_WHITELIST = [
     "Tic-80",
     "ZX Spectrum",
     "Amstrad*",
-    "NEO GEO",
+    "Neo Geo",
 
 ]
 
@@ -894,7 +898,7 @@ def export(conn, out_path, pouet_data=None):
         # Prose comments, not a `key:value` header: Demozoo is multi-platform,
         # so the platform is per line rather than set once for the whole file.
         out.write("# Demozoo release database (https://demozoo.org/)\n")
-        out.write("# puae_model=date\n")
+        out.write("# puae_model:date hatari_machinetype:date\n")
         for prod_id, title, date, precision, supertype in cur.execute(
                 "SELECT id, title, release_date_date, release_date_precision, "
                 "supertype FROM productions_production ORDER BY id"):
