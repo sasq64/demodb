@@ -8,8 +8,10 @@ one bitworld.txt and csdb.txt use:
 
 Demozoo covers every platform, so unlike the single-platform bitworld.txt and
 csdb.txt there is no `# Platform:` header — each line names its own platform.
-Only the platforms in PLATFORM_WHITELIST are exported, and releases whose only
-downloads have a blacklisted extension (see DOWNLOAD_BLACKLIST) are dropped.
+Only the platforms in PLATFORM_WHITELIST are exported; releases carrying a
+blacklisted tag (see TAG_BLACKLIST) are dropped, as are downloads with a
+blacklisted extension (see DOWNLOAD_BLACKLIST) or a url demarc cannot read back
+(see url_usable) -- and with them any release left without a download.
 Graphics and music for which Demozoo records no platform at all are still
 exported, with an empty platform field (see PLATFORMLESS_SUPERTYPES).
 
@@ -29,12 +31,14 @@ an existing SQLite database and only regenerate the export (much faster).
 
 import argparse
 from dataclasses import dataclass
+import ipaddress
 import os
 import re
 import sqlite3
 import sys
 import time
 from fnmatch import fnmatchcase
+from urllib.parse import unquote
 from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
@@ -274,6 +278,10 @@ PLATFORM_WHITELIST = [
 # an empty `platform:` field — a `-I platform:...` filter will not match them.
 PLATFORMLESS_SUPERTYPES = {"graphics", "music"}
 
+# Demozoo tags that mean "there is nothing here demarc can run": a release
+# carrying any of these is dropped whatever its downloads look like.
+TAG_BLACKLIST = {"no-binary", "no-binaries"}
+
 DOWNLOAD_BLACKLIST = [
     "*.php",
     "*.ogg",
@@ -294,6 +302,184 @@ def platform_allowed(name):
 def download_allowed(url):
     path = url.split("?", 1)[0].lower()
     return not any(fnmatchcase(path, pat) for pat in DOWNLOAD_BLACKLIST)
+
+
+# ---------------------------------------------------------------------------
+# URL parsability, mirroring what demarc does with the field we write.
+#
+# collect_db_text() in demarc's src/files.rs runs every `download:` url through
+# the Rust `url` crate and warns-and-drops the ones that do not parse; a line
+# left with no url at all is skipped entirely.  Exporting such a url therefore
+# only produces a warning at load time, and exporting a release whose urls all
+# fail produces a line demarc silently throws away -- so we drop both here.
+#
+# `url::Url::parse` implements the WHATWG URL Standard, and url_parsable() is a
+# reimplementation of the parts of it that can fail: scheme, authority, host and
+# port.  It is deliberately not a full parser -- what it does not do is IDNA, so
+# a non-ASCII host that idna would reject is accepted here (Demozoo has none).
+# Everything after the authority (path, query, fragment) is percent-encoded
+# rather than rejected, so it never decides parsability and is not looked at.
+#
+# In practice nearly every url that fails is a Demozoo BaseUrl parameter that is
+# not a url at all -- 'fuckit', '_-_minako.zip', 'attach=29942'.
+# ---------------------------------------------------------------------------
+
+# scheme, and the ':' that ends it.  Without one there is nothing to resolve a
+# relative url against, which is `RelativeUrlWithoutBase`, the failure Demozoo
+# actually produces.
+_URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
+
+# The standard's "special" schemes: they always have an authority, so an empty
+# host is an error -- except for file:, which is the one that may have none.
+_SPECIAL_SCHEMES = {"http", "https", "ws", "wss", "ftp", "file"}
+
+# C0 controls and space are stripped from both ends of a url before parsing,
+# and tab/LF/CR are removed from anywhere in it.
+_C0_OR_SPACE = "".join(chr(c) for c in range(0x21))
+_TAB_OR_NEWLINE = {0x09: None, 0x0A: None, 0x0D: None}
+
+# "Forbidden host code point": these cannot appear in a host.  (Several of them
+# would end the host anyway; keeping the whole set makes the check match the
+# standard's list rather than an ad-hoc subset.)
+_FORBIDDEN_HOST = set("\x00\t\n\r #/:<>?@[\\]^|\x7f")
+
+
+def _ipv4_number(part):
+    """The value of one dotted part, or None if it is not a number at all.
+
+    Bases follow C: `0x` is hex, a leading `0` is octal, anything else decimal.
+    """
+    if part[:2].lower() == "0x":
+        digits, base = part[2:], 16
+    elif len(part) > 1 and part[0] == "0":
+        digits, base = part[1:], 8
+    else:
+        digits, base = part, 10
+    if digits == "":
+        return 0  # bare '0' / '0x'
+    try:
+        return int(digits, base)
+    except ValueError:
+        return None
+
+
+def _ipv4_ok(parts):
+    """Whether a host that ends in a number is a valid IPv4 address.
+
+    The last part absorbs whatever room the earlier ones leave -- `1.2.771` is
+    1.2.3.3 -- so only a value too big for the remaining bytes is an error.
+    """
+    if len(parts) > 4:
+        return False
+    numbers = [_ipv4_number(p) for p in parts]
+    if any(n is None for n in numbers):
+        return False
+    if any(n > 255 for n in numbers[:-1]):
+        return False
+    return numbers[-1] < 256 ** (5 - len(parts))
+
+
+def _domain_ok(host):
+    """Whether a special scheme's host is a usable domain or IPv4 address."""
+    try:
+        # A domain is percent-decoded before it is checked, so '%41' is 'A'.
+        host = unquote(host, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not host or any(c in _FORBIDDEN_HOST or c == "%" or ord(c) < 0x20
+                       for c in host):
+        return False
+    parts = host.split(".")
+    if len(parts) > 1 and parts[-1] == "":
+        parts.pop()  # a trailing dot is a fully qualified name, not an error
+    # A host whose last part reads as a number is an IPv4 address, and is then
+    # held to IPv4's rules rather than a domain's.
+    last = parts[-1] if parts else ""
+    if last.isdigit() or (last[:2].lower() == "0x"
+                          and all(c in "0123456789abcdefABCDEF"
+                                  for c in last[2:])):
+        return _ipv4_ok(parts)
+    return True
+
+
+def _host_and_port_ok(authority, scheme):
+    """Whether the `host[:port]` half of an authority parses."""
+    if authority.startswith("["):
+        # An IPv6 literal, which has to be closed before the port.
+        end = authority.find("]")
+        if end < 0:
+            return False
+        host, rest = authority[:end + 1], authority[end + 1:]
+        # The standard's IPv6 parser knows nothing of scope ids, which
+        # ipaddress does accept -- so `[fe80::1%25eth0]` is an error here.
+        if "%" in host:
+            return False
+        try:
+            ipaddress.IPv6Address(host[1:-1])
+        except ValueError:
+            return False
+    else:
+        host, _, rest = authority.partition(":")
+        rest = rest and ":" + rest
+        if not host:
+            # Only file: (and the non-special schemes) may go without a host.
+            if scheme in _SPECIAL_SCHEMES and scheme != "file":
+                return False
+        elif scheme in _SPECIAL_SCHEMES:
+            if not _domain_ok(host):
+                return False
+        elif any(c in _FORBIDDEN_HOST or ord(c) < 0x20 for c in host):
+            return False
+    if not rest:
+        return True
+    port = rest[1:]  # rest starts with the ':' that introduces the port
+    # An empty port is allowed and simply means the scheme's default.
+    return port == "" or (port.isdigit() and int(port) <= 65535)
+
+
+def url_parsable(url):
+    """Whether demarc's `Url::parse` would accept `url` -- see the block above."""
+    url = url.strip(_C0_OR_SPACE).translate(_TAB_OR_NEWLINE)
+    m = _URL_SCHEME_RE.match(url)
+    if not m:
+        return False
+    scheme = url[:m.end() - 1].lower()
+    rest = url[m.end():]
+    if scheme in _SPECIAL_SCHEMES:
+        # A special scheme always has an authority, however many (or few)
+        # slashes were written: `http:example.com` is `http://example.com`.
+        rest = rest.lstrip("/\\")
+    elif rest.startswith("//"):
+        rest = rest[2:]
+    else:
+        # Anything else is an opaque path (`mailto:`, `data:`) and is kept
+        # as written, so there is nothing left that can fail.
+        return True
+    # The authority runs up to the first path/query/fragment delimiter, and the
+    # last '@' in it ends the userinfo.
+    end = len(rest)
+    for c in "/?#" + ("\\" if scheme in _SPECIAL_SCHEMES else ""):
+        i = rest.find(c)
+        if i >= 0:
+            end = min(end, i)
+    authority = rest[:end]
+    _, at, after_at = authority.rpartition("@")
+    return _host_and_port_ok(after_at if at else authority, scheme)
+
+
+def url_usable(url):
+    """Whether demarc can get `url` back out of a `download:` field intact.
+
+    It splits the field on ';' *before* parsing (files.rs, collect_db_text), so
+    a url containing one never reaches the parser whole: it arrives as two or
+    three pieces, of which the ones that do parse point at the wrong file and
+    the ones that do not are warned about and dropped.  Such a url cannot be
+    written to this field at all, however valid it is in itself, so it goes the
+    same way an unparsable one does.  Demozoo has a few dozen, mostly
+    `?action=dlattach;attach=31364` forum links.
+    """
+    return ";" not in url and url_parsable(url)
+
 
 # ---------------------------------------------------------------------------
 # URL resolution.  A Demozoo productionlink stores a link_class plus a
@@ -355,6 +541,7 @@ URL_RANK = {cls: i for i, cls in enumerate(URL_PRIORITY)}
 #   sndh       plain http no longer serves files.
 # ---------------------------------------------------------------------------
 URL_REWRITES = [
+    ("ftp://ftp.funet.fi/*", "https://ftp.funet.fi/*"),
     ("https://files.scene.org/get/*", "https://files.scene.org/get:de-https/*"),
     ("https://ftp.modland.com/pub/modules/pub/modules/*",
      "https://ftp.modland.com/pub/modules/*"),
@@ -634,19 +821,21 @@ def export(conn, out_path, pouet_data=None):
             prod_links.setdefault(prod_id, []).append((rank, url))
 
     prod_urls = {}
-    blacklisted = set()  # had downloads, but every one of them was blacklisted
+    # Had downloads, but none demarc could use: every one was either blacklisted
+    # or a url it cannot parse.
+    unusable = set()
     for prod_id, links in prod_links.items():
         seen = set()
         urls = []
         for _, url in sorted(links, key=lambda l: l[0]):
             if url not in seen:
                 seen.add(url)
-                if download_allowed(url):
+                if download_allowed(url) and url_usable(url):
                     urls.append(url)
         if urls:
             prod_urls[prod_id] = ";".join(urls)
         else:
-            blacklisted.add(prod_id)
+            unusable.add(prod_id)
 
     def join_names(names):
         # de-dupe, keep order; joined with ' & ' like bitworld bylines.
@@ -694,6 +883,7 @@ def export(conn, out_path, pouet_data=None):
     n_pouet = 0
     skipped_platform = 0
     skipped_download = 0
+    skipped_tag = 0
     platformless = 0
     # Same reasoning as the db: write beside out_path and rename, so a run that
     # produces nothing (an empty or truncated db read back with --skip-load)
@@ -708,6 +898,11 @@ def export(conn, out_path, pouet_data=None):
         for prod_id, title, date, precision, supertype in cur.execute(
                 "SELECT id, title, release_date_date, release_date_precision, "
                 "supertype FROM productions_production ORDER BY id"):
+            tags = sorted(tag_name[t] for t in prod_tags.get(prod_id, [])
+                          if tag_name.get(t))
+            if any(t in TAG_BLACKLIST for t in tags):
+                skipped_tag += 1
+                continue
             raw_platforms = prod_platforms.get(prod_id, [])
             platforms = [platform_name[p] for p in raw_platforms
                          if p in platform_name]
@@ -722,7 +917,7 @@ def export(conn, out_path, pouet_data=None):
                     skipped_platform += 1
                     continue
                 platformless += 1
-            if prod_id in blacklisted:
+            if prod_id in unusable:
                 skipped_download += 1
                 continue
             fields = [
@@ -736,10 +931,7 @@ def export(conn, out_path, pouet_data=None):
                     ptype_name.get(t, "") for t in prod_types.get(prod_id, [])
                     if ptype_name.get(t)
                 )),
-                ("tags", ";".join(
-                    sorted(tag_name.get(t, "") for t in prod_tags.get(prod_id, [])
-                           if tag_name.get(t))
-                )),
+                ("tags", ";".join(tags)),
                 ("download", prod_urls.get(prod_id, "")),
             ]
             # Only the (few) releases that made a toplist carry this field, so
@@ -755,17 +947,18 @@ def export(conn, out_path, pouet_data=None):
         os.remove(tmp_path)
         raise SystemExit(
             f"error: no releases to export -- {skipped_platform} productions "
-            f"were off-whitelist and {skipped_download} had only blacklisted "
-            f"downloads.  If all three counts are zero the database is empty; "
-            f"rebuild it without --skip-load."
+            f"were off-whitelist, {skipped_download} had no usable download "
+            f"and {skipped_tag} carried a blacklisted tag.  If all counts are "
+            f"zero the database is empty; rebuild it without --skip-load."
         )
     os.replace(tmp_path, out_path)
 
     print(f"Wrote {n} releases to {out_path} "
-          f"({platformless} of them without a platform; skipped "
+          f"({platformless} of them without a platform, "
+          f"{n_pouet} with pouet data; skipped "
           f"{skipped_platform} off-whitelist platforms, "
-          f"({n_pouet} with pouet data; skipped {skipped_platform} "
-          f"{skipped_download} blacklisted downloads)", file=sys.stderr)
+          f"{skipped_download} without a usable download, "
+          f"{skipped_tag} blacklisted tags)", file=sys.stderr)
 
 
 def main(argv=None):
