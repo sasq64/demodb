@@ -15,6 +15,11 @@ blacklisted extension (see DOWNLOAD_BLACKLIST) or a url demarc cannot read back
 Graphics and music for which Demozoo records no platform at all are still
 exported, with an empty platform field (see PLATFORMLESS_SUPERTYPES).
 
+A `download` is either a whole url or, for the file archives Demozoo records as
+a link_class plus a parameter, that pair as `SceneOrgFile:/parties/2006/x.zip`.
+Which mirror such a link resolves to is demarc's to decide, not ours -- see the
+URL resolution section below.
+
 A release that Demozoo links to a pouet.net prod appearing in one of the
 per-platform toplists also gets a `pouet:<cncds>,<thumbs>` field.  The toplist
 pages are fetched at startup and cached under .pouet_cache, so only the first
@@ -487,36 +492,37 @@ def url_usable(url):
 
 # ---------------------------------------------------------------------------
 # URL resolution.  A Demozoo productionlink stores a link_class plus a
-# parameter; the real URL is reconstructed from a per-class template.  We
-# implement the common ones.  `{p}` is the (stripped) parameter.
+# parameter; the real URL is the parameter appended to a base url that depends
+# on the class.  We do *not* resolve it here: the exported `download:` field
+# keeps the pair as written,
+#
+#     download:SceneOrgFile:/parties/2006/assembly06/demo/bombman.zip
+#
+# and demarc turns that into a url when it downloads it (LINK_BASES in demarc's
+# src/fetch.rs), where each class points at a list of mirrors that can be tried
+# in turn.  A mirror that dies -- or a faster one appearing -- is then a demarc
+# change rather than a regenerate of every db built from this dump.  The same
+# goes for the fixups demarc applies to links that no longer work as recorded
+# (URL_REWRITES there), which used to live here.
+#
+# BaseUrl is the exception: its parameter already is a whole url, so it is
+# exported as it stands.
 #
 # One productionlink table holds both lists a Demozoo prod page shows: the
 # download links and the external links (Pouet/csdb/Youtube/Bandcamp pages).
 # demarc fetches the exported url and tries to *run* it, so only the former
-# belong in `download:` — a prod whose only links are info pages exports an
+# belong in `download:` -- a prod whose only links are info pages exports an
 # empty download rather than a web page demarc cannot load.  Hence only file
 # classes are listed here; everything else resolves to None and is dropped.
+#
+# The order is the order in which classes are preferred when a release has
+# several links: the dedicated file archives first (matches bitworld, which
+# points at files); BaseUrl last, since it is the catch-all class and its
+# is_download_link flag is the only thing telling a file apart from a home page.
+#
+# Every class here must be one demarc knows, so keep this list and LINK_BASES
+# in step.
 # ---------------------------------------------------------------------------
-URL_TEMPLATES = {
-    "BaseUrl": "{p}",
-     # https://files.scene.org/get:fi-ftp/mirrors/amigascne/Gfx/G/Gabi/1996/Floppy-Embraced%20(8bpl).png
-    #"AmigascneFile": "http://ftp.amigascne.org/pub/amiga{p}",
-    "AmigascneFile": "https://files.scene.org/get:fi-ftp/mirrors/amigascne{p}",
-    "# SceneOrgFile": "https://files.scene.org/get{p}",
-    "SceneOrgFile": "https://files.scene.org/get:de-https{p}",
-    "ModlandFile": "https://ftp.modland.com{p}",
-    "FujiologyFile": "https://ftp.untergrund.net/users/ltk_tscc/fujiology{p}",
-    "UntergrundFile": "https://ftp.untergrund.net{p}",
-    "PaduaOrgFile": "http://ftp.padua.org/pub/c64{p}",
-    "Defacto2File": "https://defacto2.net/f/{p}",
-    "ModarchiveModule": "https://modarchive.org/module.php?{p}",
-    "SixteenColorsPack": "https://16colo.rs/pack/{p}",
-}
-
-# Order in which link classes are preferred when choosing THE url for a row.
-# The dedicated file archives first (matches bitworld, which points at files);
-# BaseUrl last, since it is the catch-all class and its is_download_link flag
-# is the only thing telling a file apart from a home page.
 URL_PRIORITY = [
     "AmigascneFile", "SceneOrgFile", "ModlandFile", "FujiologyFile",
     "UntergrundFile", "PaduaOrgFile", "Defacto2File", "ModarchiveModule",
@@ -525,51 +531,17 @@ URL_PRIORITY = [
 URL_RANK = {cls: i for i, cls in enumerate(URL_PRIORITY)}
 
 
-# ---------------------------------------------------------------------------
-# URL rewrites, applied to every resolved url as `(pattern, replacement)`
-# pairs.  A trailing `*` in the pattern matches any suffix, which is then
-# substituted for the `*` in the replacement; the first matching rule wins.
-#
-# These fix up links that are correct as Demozoo records them but awkward to
-# download: they point at a redirect, a dead host name, or a doubled path
-# prefix.  demarc used to do this at download time, so it also had to do it for
-# urls it never generated; doing it here means the exported db already holds the
-# url that works, at the cost of needing a regenerate if a mirror moves.
-#
-#   scene.org  a `/get/` link 302-redirects to a slow FTP mirror; the
-#              `/get:de-https/` variant serves the file straight over HTTPS.
-#   modland    some parameters already carry the `/pub/modules` prefix the
-#              template adds, giving a doubled path.
-#   untergrund the fujiology archive moved from the ltk_tscl user dir to
-#              ltk_tscc.
-#   sndh       plain http no longer serves files.
-# ---------------------------------------------------------------------------
-URL_REWRITES = [
-    ("ftp://ftp.funet.fi/*", "https://ftp.funet.fi/*"),
-    ("https://files.scene.org/get/*", "https://files.scene.org/get:de-https/*"),
-    ("https://ftp.modland.com/pub/modules/pub/modules/*",
-     "https://ftp.modland.com/pub/modules/*"),
-    ("https://ftp.untergrund.net/users/ltk_tscl/*",
-     "https://ftp.untergrund.net/users/ltk_tscc/*"),
-    ("http://sndh.atari.org/*", "https://sndh.atari.org/*"),
-]
-
-
-def translate_url(url):
-    """Apply the first matching URL_REWRITES rule, else return url unchanged."""
-    for pattern, replacement in URL_REWRITES:
-        if pattern.endswith("*") and replacement.endswith("*"):
-            prefix = pattern[:-1]
-            if url.startswith(prefix):
-                return replacement[:-1] + url[len(prefix):]
-    return url
-
-
 def resolve_url(link_class, parameter):
-    tmpl = URL_TEMPLATES.get(link_class)
-    if tmpl is None:
+    """The `download:` value for one productionlink, or None for a link class
+    demarc cannot resolve."""
+    if link_class not in URL_RANK:
         return None
-    return translate_url(tmpl.replace("{p}", parameter.strip()))
+    parameter = parameter.strip()
+    if not parameter:
+        return None
+    if link_class == "BaseUrl":
+        return parameter
+    return f"{link_class}:{parameter}"
 
 
 # ---------------------------------------------------------------------------
