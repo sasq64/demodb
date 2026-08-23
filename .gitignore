@@ -3,5 +3,6 @@
 demozoo-export.sql
 .csdb_cache/
 .pouet_cache/
+.pouetcache/
 pages/
 demozoo.sqlite

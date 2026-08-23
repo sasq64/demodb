@@ -20,11 +20,21 @@ a link_class plus a parameter, that pair as `SceneOrgFile:/parties/2006/x.zip`.
 Which mirror such a link resolves to is demarc's to decide, not ours -- see the
 URL resolution section below.
 
-A release that Demozoo links to a pouet.net prod appearing in one of the
-per-platform toplists also gets a `pouet:<cncds>,<thumbs>` field.  The toplist
-pages are fetched at startup and cached under .pouet_cache, so only the first
-run needs the network; --refresh-pouet refetches them and --no-pouet skips the
-whole step.
+A release that Demozoo links to a pouet.net prod also gets a
+`pouet:<cncds>,<thumbs>` field.  Where those two numbers come from is a choice:
+
+  * by default only the per-platform toplists (top 64 each) are read, so only
+    the handful of releases that made a list carry the field.  The pages are
+    fetched at startup and cached under .pouet_cache.
+  * with --pouet-prods the toplists are not read at all; instead every
+    exported release that has a pouet link is looked up in pouet's JSON API
+    (see pouet.py), cached under .pouetcache.  That covers every linked
+    release rather than 64 per platform, at the price of one request per
+    release -- tens of thousands on a cold cache, paced by --pouet-delay and,
+    for a trial run, capped by --pouet-limit.
+
+The two are alternatives, not a fallback: one source or the other.
+--refresh-pouet refetches whichever is in use and --no-pouet skips the step.
 
 Usage:
     python demozoo.py --sql demozoo-export.sql --db demozoo.sqlite \
@@ -45,6 +55,8 @@ import time
 from fnmatch import fnmatchcase
 from urllib.parse import unquote
 from urllib.request import Request, urlopen
+
+import pouet
 
 # ---------------------------------------------------------------------------
 # Which tables (and which of their columns) we pull out of the pg_dump.
@@ -239,6 +251,63 @@ def load_pouetdata(cache_dir=POUET_CACHE_DIR, refresh=False):
     return data
 
 
+# One request per release is a lot of requests, so leave a gap between them.
+# Only real fetches are paced; a warm .pouetcache runs at full speed.
+POUET_PROD_DELAY = 0.5
+
+
+def pouet_prod_lookup(cache_dir=pouet.CACHE_DIR, refresh=False,
+                      delay=POUET_PROD_DELAY, limit=0):
+    """The --pouet-prods alternative to the toplists: a `pouet_id -> PouetData`
+    lookup that asks pouet's per-prod JSON API (pouet.py) instead.
+
+    Fetching is lazy on purpose.  export() only asks about releases it is
+    actually writing out, so the off-whitelist and no-download majority never
+    costs a request -- which matters when the linked prods number six figures.
+    A prod that 404s or cannot be fetched is counted and skipped: this field is
+    an extra, not the point of the file.
+
+    `limit`, if set, caps how many prods this run will *fetch* (--pouet-limit).
+    Once it is reached the export still finishes, but the releases past it get
+    no pouet field rather than a request -- which is what makes a trial run of
+    a few dozen possible without waiting out all fifty thousand.  Prods already
+    in the cache never count against the limit, so raising it over several runs
+    walks through the list a slice at a time.
+    """
+    stats = {"fetched": 0, "failed": 0, "skipped": 0}
+
+    def lookup(pouet_id):
+        if pouet_id is None:
+            return None
+        cached = not refresh and pouet.is_cached(pouet_id, cache_dir)
+        if not cached and limit and stats["fetched"] >= limit:
+            stats["skipped"] += 1
+            if stats["skipped"] == 1:
+                print(f"  --pouet-limit {limit} reached; the rest of the "
+                      f"export goes without pouet data", file=sys.stderr)
+            return None
+        try:
+            prod = pouet.get_prod(pouet_id, cache_dir, refresh)
+        except OSError as e:
+            stats["failed"] += 1
+            if stats["failed"] <= 10:
+                print(f"  WARNING: no pouet prod {pouet_id}: {e}",
+                      file=sys.stderr)
+            return None
+        if not cached:
+            stats["fetched"] += 1
+            if stats["fetched"] % 100 == 0:
+                print(f"  fetched {stats['fetched']} pouet prod pages "
+                      f"({stats['failed']} failed)", file=sys.stderr)
+            if delay:
+                time.sleep(delay)
+        if prod is None:
+            return None
+        return PouetData(id=prod.id, thumbs=prod.rulez, cncd_count=prod.cdc)
+
+    return lookup
+
+
 
 # ---------------------------------------------------------------------------
 # What gets exported at all.
@@ -295,8 +364,10 @@ DOWNLOAD_BLACKLIST = [
     "*.php",
     "*.ogg",
     "*.mp4",
+    "*.mpg",
     "*.avi",
     "*.wmv",
+    "*.mkv",
     "*.pdf",
     "*.wav",
     "*.ogg",
@@ -734,8 +805,12 @@ def group_multimap(cur, table, key_col, val_col):
     return d
 
 
-def export(conn, out_path, pouet_data=None):
-    pouet_data = pouet_data or {}
+def export(conn, out_path, pouet_data=None, pouet_lookup=None):
+    """Write the export.  `pouet_data` is the toplist map from load_pouetdata;
+    `pouet_lookup` (--pouet-prods) replaces it with a per-prod callable that
+    goes to pouet.net for one release at a time.  Exactly one of the two is in
+    play -- there is no falling back from one to the other."""
+    pouet_lookup = pouet_lookup or (pouet_data or {}).get
     cur = conn.cursor()
     (nick_name, nick_releaser, is_group, ptype_name,
      platform_name, party_name, tag_name) = scalar_maps(cur)
@@ -910,9 +985,10 @@ def export(conn, out_path, pouet_data=None):
                 ("tags", ";".join(tags)),
                 ("download", prod_urls.get(prod_id, "")),
             ]
-            # Only the (few) releases that made a toplist carry this field, so
-            # its absence -- not an empty value -- means "not on the list".
-            pd = pouet_data.get(prod_pouet_id.get(prod_id))
+            # Not every release has this field -- in toplist mode only the
+            # few that made a list do -- so its absence, not an empty value,
+            # means "no pouet numbers for this one".
+            pd = pouet_lookup(prod_pouet_id.get(prod_id))
             if pd is not None:
                 fields.append(("pouet", f"{pd.cncd_count},{pd.thumbs}"))
                 n_pouet += 1
@@ -951,20 +1027,43 @@ def main(argv=None):
     ap.add_argument("--pouet-cache", default=POUET_CACHE_DIR,
                     help=f"where toplist pages are cached "
                          f"(default: {POUET_CACHE_DIR})")
+    ap.add_argument("--pouet-prods", action="store_true",
+                    help="look each exported release up in pouet's prod API "
+                         "instead of reading the toplists (one request per "
+                         "release with a pouet link, cached)")
+    ap.add_argument("--pouet-prod-cache", default=pouet.CACHE_DIR,
+                    help=f"where --pouet-prods caches API responses "
+                         f"(default: {pouet.CACHE_DIR})")
+    ap.add_argument("--pouet-limit", type=int, default=0, metavar="N",
+                    help="stop after N --pouet-prods fetches (0: no limit); "
+                         "cached pages do not count, so a trial run stays "
+                         "short and a later run picks up where it left off")
+    ap.add_argument("--pouet-delay", type=float, default=POUET_PROD_DELAY,
+                    help=f"seconds between --pouet-prods fetches "
+                         f"(default: {POUET_PROD_DELAY})")
     ap.add_argument("--refresh-pouet", action="store_true",
-                    help="refetch the pouet toplists instead of using the cache")
+                    help="refetch the pouet pages instead of using the cache")
     ap.add_argument("--no-pouet", action="store_true",
-                    help="skip the pouet toplists (no pouet: field)")
+                    help="skip pouet entirely (no pouet: field)")
     args = ap.parse_args(argv)
 
-    pouet_data = {} if args.no_pouet else load_pouetdata(
-        args.pouet_cache, args.refresh_pouet)
+    # One source or the other, never both: --pouet-prods covers every linked
+    # release, the toplists only their top 64.
+    pouet_data, pouet_lookup = {}, None
+    if args.no_pouet:
+        pass
+    elif args.pouet_prods:
+        pouet_lookup = pouet_prod_lookup(
+            args.pouet_prod_cache, args.refresh_pouet, args.pouet_delay,
+            args.pouet_limit)
+    else:
+        pouet_data = load_pouetdata(args.pouet_cache, args.refresh_pouet)
 
     if args.skip_load:
         conn = sqlite3.connect(args.db)
     else:
         conn = load_database(args.sql, args.db)
-    export(conn, args.out, pouet_data)
+    export(conn, args.out, pouet_data, pouet_lookup)
     conn.close()
 
 
