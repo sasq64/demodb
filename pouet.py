@@ -13,9 +13,18 @@ percentage, the thumb-up/ok/down votes and any awards the prod won or was
 nominated for.  The API answers with ~5KB of JSON where prod.php is ~100KB of
 HTML for the same numbers, and it needs no html parser.
 
-Responses are cached under .pouetcache/prod-<id>.json, so a rerun is offline
-and pouet.net is only asked once per prod.  Pass refresh=True (or --refresh on
-the command line) to refetch.
+pouet.net also publishes a full data dump of every prod --
+pouetdatadump-prods-<date>.json, ~160MB of the same rows the API serves.  When
+one is lying next to this file we answer out of it instead: a lookup costs a
+seek and one json.loads, not a request, which turns an export of fifty thousand
+prods from an afternoon of polite fetching into a few seconds.  The dump is
+only read once, lazily, the first time somebody asks for a prod (see
+load_dump), and it is a *snapshot*: pass refresh=True to go to the live API for
+today's vote counts.
+
+Prods the dump does not have -- newer than the dump date, mostly -- still go to
+the API, and responses are cached under .pouetcache/prod-<id>.json, so a rerun
+is offline and pouet.net is only asked once per prod.
 
     >>> get_prod(981)
     PouetProd(id=981, name='Hardwired', cdc=24, popularity=84.6..., rulez=292,
@@ -25,6 +34,7 @@ Run as a script to dump one or more prods:  ./pouet.py 981 51983
 """
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -39,6 +49,12 @@ API_URL = "https://api.pouet.net/v1/prod/?id={id}"
 # newer vote counts.  Kept separate from demozoo.py's .pouet_cache, which holds
 # the per-platform toplist pages.
 CACHE_DIR = ".pouetcache"
+
+# The offline data dump.  Looked for next to this file and in the working
+# directory; the names sort by date, so the newest one wins.  $POUET_DUMP
+# overrides both, and setting it to an empty string turns the dump off.
+DUMP_GLOB = "pouetdatadump-prods-*.json"
+DUMP_ENV = "POUET_DUMP"
 
 
 @dataclass
@@ -79,6 +95,16 @@ class PouetProd:
         """Popularity as the site shows it: 73.945 -> 73."""
         return int(self.popularity)
 
+    @property
+    def winner_ids(self) -> list[int]:
+        """Category ids this prod won, in API order."""
+        return [a.category_id for a in self.awards if a.type == "winner"]
+
+    @property
+    def nominee_ids(self) -> list[int]:
+        """Category ids this prod was only nominated for, in API order."""
+        return [a.category_id for a in self.awards if a.type == "nominee"]
+
 
 _INT_RE = re.compile(r"-?\d+")
 
@@ -115,9 +141,10 @@ def cache_path(prod_id, cache_dir=CACHE_DIR):
 
 
 def is_cached(prod_id, cache_dir=CACHE_DIR):
-    """True if get_prod(`prod_id`) would answer without hitting the network.
+    """True if get_prod(`prod_id`) would answer without hitting the network --
+    because the data dump has the prod, or because we fetched it before.
     Callers pacing a long run use this to sleep only between real fetches."""
-    return os.path.exists(cache_path(prod_id, cache_dir))
+    return in_dump(prod_id) or os.path.exists(cache_path(prod_id, cache_dir))
 
 
 def prod_json(prod_id, cache_dir=CACHE_DIR, refresh=False):
@@ -164,7 +191,13 @@ def parse_prod(text, prod_id: int = 0) -> PouetProd | None:
     p = data.get("prod")
     if not isinstance(p, dict):
         return None
+    return parse_row(p, prod_id)
 
+
+def parse_row(p: dict, prod_id: int = 0) -> PouetProd:
+    """One prod row -> PouetProd.  The API wraps this in {"success", "prod"}
+    and the data dump lists the very same rows under "prods", so both go
+    through here."""
     awards = []
     for a in p.get("awards") or []:
         if isinstance(a, dict):
@@ -184,9 +217,129 @@ def parse_prod(text, prod_id: int = 0) -> PouetProd | None:
     )
 
 
+# ---------------------------------------------------------------------------
+# The offline data dump.
+#
+# The file is one long json object, but pouet writes it with every prod on its
+# own line:
+#
+#     {"dump_date":"2026-08-19 04:30:01","prods":[
+#     {"id":"1","name":"Astral Blur",...},
+#     ...
+#     ]}
+#
+# so we never decode the whole 160MB.  Loading it means scanning the lines for
+# the leading "id" and remembering each one's byte offset -- about a tenth of a
+# second and 5MB for a hundred thousand prods -- after which a lookup is a seek
+# and one json.loads of a single line.  If pouet ever reformats the dump the
+# scan simply finds nothing, and we say so once and fall back to the API.
+# ---------------------------------------------------------------------------
+
+_DUMP_ID_RE = re.compile(rb'^\{"id":"?(\d+)"?')
+
+# (path, {prod id: byte offset}, open file) for the loaded dump, or None once
+# we have looked and found nothing.  _dump_loaded keeps us from looking twice.
+_dump = None
+_dump_loaded = False
+
+
+def find_dump(path=None):
+    """Where the data dump is, or None.  An explicit `path` (or $POUET_DUMP)
+    wins; otherwise the newest DUMP_GLOB match beside this file or in the
+    working directory, the names being datestamped and so sorting by age."""
+    if path is None:
+        path = os.environ.get(DUMP_ENV)
+    if path is not None:
+        # Empty $POUET_DUMP is how you say "no dump, use the API".
+        return path or None
+    found = []
+    for d in (os.path.dirname(os.path.abspath(__file__)), os.getcwd()):
+        found += glob.glob(os.path.join(d, DUMP_GLOB))
+    return max(found, key=os.path.basename) if found else None
+
+
+def load_dump(path=None):
+    """Index the data dump, once -- every lookup after the first reuses the
+    index.  Returns (path, index, file) or None when there is no dump to read;
+    a missing or unreadable file is not an error, it just means the API answers
+    the lookups."""
+    global _dump, _dump_loaded
+    if path:
+        path = os.path.abspath(path)
+    # Asking again for the dump we already hold -- by name or by no name at
+    # all -- is what a per-prod caller does, and must not reindex it.
+    if _dump_loaded and (path is None or (_dump and path == _dump[0])):
+        return _dump
+    if path is None:
+        path = find_dump()
+        if path:
+            path = os.path.abspath(path)
+    _dump_loaded = True
+    _dump = None
+    if not path:
+        return None
+    try:
+        f = open(path, "rb")
+    except OSError as e:
+        print(f"  WARNING: cannot read pouet dump {path}: {e}", file=sys.stderr)
+        return None
+
+    index = {}
+    offset = 0
+    for line in f:
+        m = _DUMP_ID_RE.match(line)
+        if m:
+            index[int(m.group(1))] = offset
+        offset += len(line)
+    if not index:
+        print(f"  WARNING: no prods found in pouet dump {path}; "
+              f"falling back to the API", file=sys.stderr)
+        f.close()
+        return None
+    print(f"Pouet data dump: {len(index)} prods from "
+          f"{os.path.basename(path)}", file=sys.stderr)
+    _dump = (path, index, f)
+    return _dump
+
+
+def in_dump(prod_id, path=None) -> bool:
+    """True if dump_prod(`prod_id`) would answer.  Callers pacing a run use
+    this, like is_cached, to sleep only when they are really fetching."""
+    dump = load_dump(path)
+    return bool(dump) and int(prod_id) in dump[1]
+
+
+def dump_prod(prod_id, path=None) -> PouetProd | None:
+    """`prod_id` out of the data dump, or None if there is no dump or it does
+    not have that prod (anything added after the dump date, mostly)."""
+    dump = load_dump(path)
+    if not dump:
+        return None
+    _, index, f = dump
+    offset = index.get(int(prod_id))
+    if offset is None:
+        return None
+    f.seek(offset)
+    # Every prod line but the last ends in a comma before the closing "]}".
+    line = f.readline().strip().rstrip(b",")
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    return parse_row(row, prod_id) if isinstance(row, dict) else None
+
+
 def get_prod(prod_id, cache_dir=CACHE_DIR, refresh=False) -> PouetProd | None:
-    """Fetch (or read back) one prod and parse it.  None if pouet has no such
-    prod; raises OSError (urllib's HTTPError included) if the fetch fails."""
+    """One prod, from the data dump if it has it, else fetched (or read back
+    from the cache) over the API.  None if pouet has no such prod; raises
+    OSError (urllib's HTTPError included) if the fetch fails.
+
+    `refresh` skips the dump as well as the cache: the dump is a snapshot, so
+    it is also what you refresh away from when you want today's votes."""
+    if not refresh:
+        prod = dump_prod(prod_id)
+        if prod is not None:
+            return prod
     return parse_prod(prod_json(prod_id, cache_dir, refresh), prod_id)
 
 
@@ -219,8 +372,16 @@ def main():
     ap.add_argument("--cache-dir", default=CACHE_DIR,
                     help=f"where responses are cached (default: {CACHE_DIR})")
     ap.add_argument("--refresh", action="store_true",
-                    help="refetch instead of using the cache")
+                    help="refetch instead of using the dump or the cache")
+    ap.add_argument("--dump", default=None,
+                    help=f"the data dump to read ({DUMP_GLOB} beside this "
+                         f"script or in the working directory by default)")
+    ap.add_argument("--no-dump", action="store_true",
+                    help="ignore the data dump and ask the API")
     args = ap.parse_args()
+
+    if not args.refresh:
+        load_dump("" if args.no_dump else args.dump)
 
     for prod_id in args.ids:
         prod = get_prod(prod_id, args.cache_dir, args.refresh)

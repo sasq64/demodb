@@ -6,3 +6,5 @@ demozoo-export.sql
 .pouetcache/
 pages/
 demozoo.sqlite
+pouetdatadump-prods-*.json
+__pycache__/

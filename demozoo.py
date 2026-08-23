@@ -21,17 +21,22 @@ Which mirror such a link resolves to is demarc's to decide, not ours -- see the
 URL resolution section below.
 
 A release that Demozoo links to a pouet.net prod also gets a
-`pouet:<cncds>,<thumbs>` field.  Where those two numbers come from is a choice:
+`pouet:<cncds>,<thumbs>,<rank>,<won>,<nominated>` field, the last two being
+space-separated award category ids ("pouet:9,398,19,1 5 7,8 55").  Where those
+numbers come from is a choice:
 
   * by default only the per-platform toplists (top 64 each) are read, so only
     the handful of releases that made a list carry the field.  The pages are
-    fetched at startup and cached under .pouet_cache.
+    fetched at startup and cached under .pouet_cache.  A toplist row only
+    carries the votes and the CDCs, so rank and awards come out empty.
   * with --pouet-prods the toplists are not read at all; instead every
-    exported release that has a pouet link is looked up in pouet's JSON API
-    (see pouet.py), cached under .pouetcache.  That covers every linked
-    release rather than 64 per platform, at the price of one request per
-    release -- tens of thousands on a cold cache, paced by --pouet-delay and,
-    for a trial run, capped by --pouet-limit.
+    exported release that has a pouet link is looked up in pouet.py, which
+    answers out of pouet's offline data dump (pouetdatadump-prods-*.json) if
+    one is there and otherwise fetches and caches the prod's JSON API page.
+    That covers every linked release rather than 64 per platform.  With a dump
+    it costs nothing; without one it is a request per release -- tens of
+    thousands on a cold cache, paced by --pouet-delay and, for a trial run,
+    capped by --pouet-limit.
 
 The two are alternatives, not a fallback: one source or the other.
 --refresh-pouet refetches whichever is in use and --no-pouet skips the step.
@@ -45,7 +50,7 @@ an existing SQLite database and only regenerate the export (much faster).
 """
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import ipaddress
 import os
 import re
@@ -142,9 +147,30 @@ POUET_CACHE_DIR = ".pouet_cache"
 
 @dataclass
 class PouetData:
+    """The pouet numbers for one release, as the `pouet:` field spells them.
+
+    `rank` is the prod's alltime-top position (0 when it has none) and
+    `winners`/`nominees` are the award category ids it won and was nominated
+    for.  Only --pouet-prods knows any of those three: a toplist row carries
+    the votes and the CDCs and nothing else, so in toplist mode they stay at
+    their empty defaults."""
     id: int
     thumbs: int
     cncd_count: int
+    rank: int = 0
+    winners: list[int] = field(default_factory=list)
+    nominees: list[int] = field(default_factory=list)
+
+    def field_value(self) -> str:
+        """`<cncds>,<thumbs>,<rank>,<won ids>,<nominated ids>`, the last two
+        space-separated ('9,398,19,1 5 7,8 55').  A prod with no rank and no
+        awards ends in '0,,' -- the field is fixed-width in commas, so demarc
+        can split it without counting."""
+        return ",".join([
+            str(self.cncd_count), str(self.thumbs), str(self.rank),
+            " ".join(str(i) for i in self.winners),
+            " ".join(str(i) for i in self.nominees),
+        ])
 
 
 _PROD_ID_RE = re.compile(r"prod\.php\?which=(\d+)")
@@ -270,9 +296,10 @@ def pouet_prod_lookup(cache_dir=pouet.CACHE_DIR, refresh=False,
     `limit`, if set, caps how many prods this run will *fetch* (--pouet-limit).
     Once it is reached the export still finishes, but the releases past it get
     no pouet field rather than a request -- which is what makes a trial run of
-    a few dozen possible without waiting out all fifty thousand.  Prods already
-    in the cache never count against the limit, so raising it over several runs
-    walks through the list a slice at a time.
+    a few dozen possible without waiting out all fifty thousand.  Prods that
+    cost no request -- the ones in pouet's data dump, and the ones already in
+    the cache -- never count against the limit, so with a dump in place the
+    limit and the delay simply never come into play.
     """
     stats = {"fetched": 0, "failed": 0, "skipped": 0}
 
@@ -303,7 +330,9 @@ def pouet_prod_lookup(cache_dir=pouet.CACHE_DIR, refresh=False,
                 time.sleep(delay)
         if prod is None:
             return None
-        return PouetData(id=prod.id, thumbs=prod.rulez, cncd_count=prod.cdc)
+        return PouetData(id=prod.id, thumbs=prod.rulez, cncd_count=prod.cdc,
+                         rank=prod.rank, winners=prod.winner_ids,
+                         nominees=prod.nominee_ids)
 
     return lookup
 
@@ -330,7 +359,6 @@ def pouet_prod_lookup(cache_dir=pouet.CACHE_DIR, refresh=False,
 PLATFORM_WHITELIST = [
     "Amiga AGA",
     "Amiga OCS*",
-    "Amiga*",
     "Atari ST*",
     "Atari 8*",
     "Atari 2600",
@@ -990,7 +1018,7 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
             # means "no pouet numbers for this one".
             pd = pouet_lookup(prod_pouet_id.get(prod_id))
             if pd is not None:
-                fields.append(("pouet", f"{pd.cncd_count},{pd.thumbs}"))
+                fields.append(("pouet", pd.field_value()))
                 n_pouet += 1
             out.write("\t".join(f"{key}:{clean(val)}" for key, val in fields) + "\n")
             n += 1
@@ -1028,9 +1056,10 @@ def main(argv=None):
                     help=f"where toplist pages are cached "
                          f"(default: {POUET_CACHE_DIR})")
     ap.add_argument("--pouet-prods", action="store_true",
-                    help="look each exported release up in pouet's prod API "
-                         "instead of reading the toplists (one request per "
-                         "release with a pouet link, cached)")
+                    help="look each exported release up in pouet's data dump "
+                         "or, failing that, its prod API, instead of reading "
+                         "the toplists (covers every release with a pouet "
+                         "link, not just the toplisted ones)")
     ap.add_argument("--pouet-prod-cache", default=pouet.CACHE_DIR,
                     help=f"where --pouet-prods caches API responses "
                          f"(default: {pouet.CACHE_DIR})")

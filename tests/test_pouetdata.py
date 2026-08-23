@@ -82,7 +82,9 @@ def test_export_pouet_field(tmp_path):
     lines = [l for l in out.read_text(encoding="utf-8").splitlines()
              if not l.startswith("#")]
     assert len(lines) == 3
-    assert fields(lines[0])["pouet"] == "18,576"
+    # A toplist row knows no rank and no awards, so those come out empty --
+    # the field still has all five parts.
+    assert fields(lines[0])["pouet"] == "18,576,0,,"
     assert "pouet" not in fields(lines[1])
     assert "pouet" not in fields(lines[2])
     # The pouet link is an external link and must not become a download.

@@ -15,7 +15,7 @@ csdb: csdb_cache
     ./csdb.py
 
 demozoo: demozoo_export
-    ./demozoo.py
+    ./demozoo.py --pouet-prods
 
 
 export:
