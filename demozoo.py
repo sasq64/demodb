@@ -136,6 +136,8 @@ POUET_IDS = {
     "Atari 2600": 117,
     "Amstrad CPC": 78,
     "Atari XL": 109,
+    "MS-DOS": 67,
+    "MS-DOS/Gus": 69, 
 }
 
 POUET_TOPLIST_URL = "https://www.pouet.net/toplist.php?type=&platform={id}&limit=64"
@@ -373,6 +375,7 @@ PLATFORM_WHITELIST = [
     "ZX Spectrum",
     "Amstrad*",
     "Neo Geo",
+    "MS-Dos",
 
 ]
 
