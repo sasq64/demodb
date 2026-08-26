@@ -360,7 +360,7 @@ def pouet_prod_lookup(cache_dir=pouet.CACHE_DIR, refresh=False,
 # ---------------------------------------------------------------------------
 PLATFORM_WHITELIST = [
     "Amiga AGA",
-    "Amiga OCS*",
+    "Amiga",
     "Atari ST*",
     "Atari 8*",
     "Atari 2600",
@@ -376,7 +376,7 @@ PLATFORM_WHITELIST = [
     "Amstrad*",
     "Neo Geo",
     "MS-Dos",
-
+    "Windows",
 ]
 
 # Demozoo only really insists on a platform for executable prods; for graphics
