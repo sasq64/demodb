@@ -18,7 +18,11 @@ exported, with an empty platform field (see PLATFORMLESS_SUPERTYPES).
 A `download` is either a whole url or, for the file archives Demozoo records as
 a link_class plus a parameter, that pair as `SceneOrgFile:/parties/2006/x.zip`.
 Which mirror such a link resolves to is demarc's to decide, not ours -- see the
-URL resolution section below.
+URL resolution section below.  Alongside it a `dlname` field carries each
+download's own label from Demozoo ("HD Version", ...), semicolon-separated and
+in step with `download` so the nth name goes with the nth url; unlabelled links
+leave their slot empty, and a release whose links are all unlabelled gets an
+empty `dlname`.
 
 A release that Demozoo links to a pouet.net prod also gets a
 `pouet:<cncds>,<thumbs>,<rank>,<won>,<nominated>` field, the last two being
@@ -85,6 +89,7 @@ TABLES = {
     "parties_party": ["id", "name"],
     "productions_productionlink": [
         "production_id", "link_class", "parameter", "is_download_link",
+        "description",
     ],
     "taggit_tag": ["id", "name"],
     "taggit_taggeditem": ["tag_id", "object_id", "content_type_id"],
@@ -882,9 +887,9 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
     # what a release actually launches; the rest are fallbacks.
     prod_links = {}
     prod_pouet_id = {}  # production -> the pouet prod it is linked to
-    for prod_id, link_class, parameter, is_dl in cur.execute(
-            "SELECT production_id, link_class, parameter, is_download_link "
-            "FROM productions_productionlink"):
+    for prod_id, link_class, parameter, is_dl, description in cur.execute(
+            "SELECT production_id, link_class, parameter, is_download_link, "
+            "description FROM productions_productionlink"):
         # The external half of the table is pages *about* the release; the one
         # we keep is the Pouet link, whose parameter is the pouet prod id and
         # so is what ties a production to its toplist row.
@@ -900,22 +905,34 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
             continue
         url = resolve_url(link_class, parameter)
         if url:
-            prod_links.setdefault(prod_id, []).append((rank, url))
+            # A semicolon in a label would split the dlname field out of step
+            # with download, so fold it away here.
+            name = (description or "").strip().replace(";", ",")
+            prod_links.setdefault(prod_id, []).append((rank, url, name))
 
     prod_urls = {}
+    # dlname is the download link's own label ("HD Version", ...), kept in step
+    # with the download field so the nth name goes with the nth url.
+    prod_dlnames = {}
     # Had downloads, but none demarc could use: every one was either blacklisted
     # or a url it cannot parse.
     unusable = set()
     for prod_id, links in prod_links.items():
         seen = set()
         urls = []
-        for _, url in sorted(links, key=lambda l: l[0]):
+        names = []
+        for _, url, name in sorted(links, key=lambda l: l[0]):
             if url not in seen:
                 seen.add(url)
                 if download_allowed(url) and url_usable(url):
                     urls.append(url)
+                    names.append(name)
         if urls:
             prod_urls[prod_id] = ";".join(urls)
+            # Only carry names when at least one link is actually labelled,
+            # so releases with no descriptions get an empty dlname field.
+            if any(names):
+                prod_dlnames[prod_id] = ";".join(names)
         else:
             unusable.add(prod_id)
 
@@ -1015,6 +1032,7 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
                 )),
                 ("tags", ";".join(tags)),
                 ("download", prod_urls.get(prod_id, "")),
+                ("dlname", prod_dlnames.get(prod_id, "")),
             ]
             # Not every release has this field -- in toplist mode only the
             # few that made a list do -- so its absence, not an empty value,
