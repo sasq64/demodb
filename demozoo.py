@@ -73,7 +73,11 @@ import pouet
 # ---------------------------------------------------------------------------
 TABLES = {
     "productions_production": [
-        "id", "title", "release_date_date", "release_date_precision", "supertype",
+        "id",
+        "title",
+        "release_date_date",
+        "release_date_precision",
+        "supertype",
     ],
     "productions_production_author_nicks": ["production_id", "nick_id"],
     "productions_production_author_affiliation_nicks": ["production_id", "nick_id"],
@@ -88,8 +92,15 @@ TABLES = {
     "parties_party_releases": ["party_id", "production_id"],
     "parties_party": ["id", "name"],
     "productions_productionlink": [
+<<<<<<< HEAD
         "production_id", "link_class", "parameter", "is_download_link",
         "description",
+=======
+        "production_id",
+        "link_class",
+        "parameter",
+        "is_download_link",
+>>>>>>> 2fa2fbd (Added PSP to demozoo)
     ],
     "taggit_tag": ["id", "name"],
     "taggit_taggeditem": ["tag_id", "object_id", "content_type_id"],
@@ -123,6 +134,7 @@ PLATFORM_NAMES = {
     "Nintendo Game Boy Color (GBC)": "Gameboy Color",
     "Nintendo Game Boy Advance (GBA)": "GBA",
     "Sony Playstation 1 (PSX)": "PlayStation",
+    "Sony Playstation Portable (PSP)": "PSP",
     "TIC-80": "Tic-80",
     "PICO-8": "Pico8",
 }
@@ -132,7 +144,7 @@ POUET_IDS = {
     "Amiga": 73,
     "Amiga AGA": 71,
     "Atari ST": 70,
-    "Atari STe": 72, # NOTE: joined with ST for demarc
+    "Atari STe": 72,  # NOTE: joined with ST for demarc
     "PlayStation": 75,
     "Gameboy": 81,
     "Gameboy Color": 86,
@@ -142,7 +154,7 @@ POUET_IDS = {
     "Amstrad CPC": 78,
     "Atari XL": 109,
     "MS-DOS": 67,
-    "MS-DOS/Gus": 69, 
+    "MS-DOS/Gus": 69,
 }
 
 POUET_TOPLIST_URL = "https://www.pouet.net/toplist.php?type=&platform={id}&limit=64"
@@ -151,6 +163,7 @@ POUET_TOPLIST_URL = "https://www.pouet.net/toplist.php?type=&platform={id}&limit
 # --refresh-pouet) to pick up newer vote counts.  A cached copy also means a
 # rebuild works offline and does not hammer pouet.net once per platform.
 POUET_CACHE_DIR = ".pouet_cache"
+
 
 @dataclass
 class PouetData:
@@ -161,6 +174,7 @@ class PouetData:
     for.  Only --pouet-prods knows any of those three: a toplist row carries
     the votes and the CDCs and nothing else, so in toplist mode they stay at
     their empty defaults."""
+
     id: int
     thumbs: int
     cncd_count: int
@@ -173,11 +187,15 @@ class PouetData:
         space-separated ('9,398,19,1 5 7,8 55').  A prod with no rank and no
         awards ends in '0,,' -- the field is fixed-width in commas, so demarc
         can split it without counting."""
-        return ",".join([
-            str(self.cncd_count), str(self.thumbs), str(self.rank),
-            " ".join(str(i) for i in self.winners),
-            " ".join(str(i) for i in self.nominees),
-        ])
+        return ",".join(
+            [
+                str(self.cncd_count),
+                str(self.thumbs),
+                str(self.rank),
+                " ".join(str(i) for i in self.winners),
+                " ".join(str(i) for i in self.nominees),
+            ]
+        )
 
 
 _PROD_ID_RE = re.compile(r"prod\.php\?which=(\d+)")
@@ -231,11 +249,13 @@ def parse_toplist(html: str) -> list[PouetData]:
             continue
         cdc = li.find("div", class_="cdcstack")
         rulez = li.find("span", class_="rulez")
-        out.append(PouetData(
-            id=int(m.group(1)),
-            thumbs=_leading_int(rulez.get_text() if rulez else ""),
-            cncd_count=_leading_int(cdc.get("title") if cdc else ""),
-        ))
+        out.append(
+            PouetData(
+                id=int(m.group(1)),
+                thumbs=_leading_int(rulez.get_text() if rulez else ""),
+                cncd_count=_leading_int(cdc.get("title") if cdc else ""),
+            )
+        )
     return out
 
 
@@ -256,8 +276,9 @@ def toplist_html(platform_id, cache_dir=POUET_CACHE_DIR, refresh=False):
     return html
 
 
-def populate_pouetdata(platform_id: int, cache_dir=POUET_CACHE_DIR,
-                       refresh=False) -> list[PouetData]:
+def populate_pouetdata(
+    platform_id: int, cache_dir=POUET_CACHE_DIR, refresh=False
+) -> list[PouetData]:
     """Fetch (or read back) the Pouet toplist for one platform id (POUET_IDS)."""
     return parse_toplist(toplist_html(platform_id, cache_dir, refresh))
 
@@ -289,8 +310,9 @@ def load_pouetdata(cache_dir=POUET_CACHE_DIR, refresh=False):
 POUET_PROD_DELAY = 0.5
 
 
-def pouet_prod_lookup(cache_dir=pouet.CACHE_DIR, refresh=False,
-                      delay=POUET_PROD_DELAY, limit=0):
+def pouet_prod_lookup(
+    cache_dir=pouet.CACHE_DIR, refresh=False, delay=POUET_PROD_DELAY, limit=0
+):
     """The --pouet-prods alternative to the toplists: a `pouet_id -> PouetData`
     lookup that asks pouet's per-prod JSON API (pouet.py) instead.
 
@@ -317,32 +339,41 @@ def pouet_prod_lookup(cache_dir=pouet.CACHE_DIR, refresh=False,
         if not cached and limit and stats["fetched"] >= limit:
             stats["skipped"] += 1
             if stats["skipped"] == 1:
-                print(f"  --pouet-limit {limit} reached; the rest of the "
-                      f"export goes without pouet data", file=sys.stderr)
+                print(
+                    f"  --pouet-limit {limit} reached; the rest of the "
+                    f"export goes without pouet data",
+                    file=sys.stderr,
+                )
             return None
         try:
             prod = pouet.get_prod(pouet_id, cache_dir, refresh)
         except OSError as e:
             stats["failed"] += 1
             if stats["failed"] <= 10:
-                print(f"  WARNING: no pouet prod {pouet_id}: {e}",
-                      file=sys.stderr)
+                print(f"  WARNING: no pouet prod {pouet_id}: {e}", file=sys.stderr)
             return None
         if not cached:
             stats["fetched"] += 1
             if stats["fetched"] % 100 == 0:
-                print(f"  fetched {stats['fetched']} pouet prod pages "
-                      f"({stats['failed']} failed)", file=sys.stderr)
+                print(
+                    f"  fetched {stats['fetched']} pouet prod pages "
+                    f"({stats['failed']} failed)",
+                    file=sys.stderr,
+                )
             if delay:
                 time.sleep(delay)
         if prod is None:
             return None
-        return PouetData(id=prod.id, thumbs=prod.rulez, cncd_count=prod.cdc,
-                         rank=prod.rank, winners=prod.winner_ids,
-                         nominees=prod.nominee_ids)
+        return PouetData(
+            id=prod.id,
+            thumbs=prod.rulez,
+            cncd_count=prod.cdc,
+            rank=prod.rank,
+            winners=prod.winner_ids,
+            nominees=prod.nominee_ids,
+        )
 
     return lookup
-
 
 
 # ---------------------------------------------------------------------------
@@ -367,9 +398,9 @@ PLATFORM_WHITELIST = [
     "Amiga AGA",
     "Amiga",
     "Atari ST*",
-    "Atari 8*",
+    "Atari XL",
     "Atari 2600",
-    "C64*",
+    "C64",
     "C16",
     "Megadrive",
     "SNES",
@@ -378,10 +409,12 @@ PLATFORM_WHITELIST = [
     "PlayStation",
     "Tic-80",
     "ZX Spectrum",
-    "Amstrad*",
+    "Amstrad CPC",
     "Neo Geo",
     "MS-Dos",
     "Windows",
+    "Pico*",
+    "PSP",
 ]
 
 # Demozoo only really insists on a platform for executable prods; for graphics
@@ -502,8 +535,7 @@ def _domain_ok(host):
         host = unquote(host, errors="strict")
     except (UnicodeDecodeError, ValueError):
         return False
-    if not host or any(c in _FORBIDDEN_HOST or c == "%" or ord(c) < 0x20
-                       for c in host):
+    if not host or any(c in _FORBIDDEN_HOST or c == "%" or ord(c) < 0x20 for c in host):
         return False
     parts = host.split(".")
     if len(parts) > 1 and parts[-1] == "":
@@ -511,9 +543,10 @@ def _domain_ok(host):
     # A host whose last part reads as a number is an IPv4 address, and is then
     # held to IPv4's rules rather than a domain's.
     last = parts[-1] if parts else ""
-    if last.isdigit() or (last[:2].lower() == "0x"
-                          and all(c in "0123456789abcdefABCDEF"
-                                  for c in last[2:])):
+    if last.isdigit() or (
+        last[:2].lower() == "0x"
+        and all(c in "0123456789abcdefABCDEF" for c in last[2:])
+    ):
         return _ipv4_ok(parts)
     return True
 
@@ -525,7 +558,7 @@ def _host_and_port_ok(authority, scheme):
         end = authority.find("]")
         if end < 0:
             return False
-        host, rest = authority[:end + 1], authority[end + 1:]
+        host, rest = authority[: end + 1], authority[end + 1 :]
         # The standard's IPv6 parser knows nothing of scope ids, which
         # ipaddress does accept -- so `[fe80::1%25eth0]` is an error here.
         if "%" in host:
@@ -559,8 +592,8 @@ def url_parsable(url):
     m = _URL_SCHEME_RE.match(url)
     if not m:
         return False
-    scheme = url[:m.end() - 1].lower()
-    rest = url[m.end():]
+    scheme = url[: m.end() - 1].lower()
+    rest = url[m.end() :]
     if scheme in _SPECIAL_SCHEMES:
         # A special scheme always has an authority, however many (or few)
         # slashes were written: `http:example.com` is `http://example.com`.
@@ -631,9 +664,16 @@ def url_usable(url):
 # in step.
 # ---------------------------------------------------------------------------
 URL_PRIORITY = [
-    "AmigascneFile", "SceneOrgFile", "ModlandFile", "FujiologyFile",
-    "UntergrundFile", "PaduaOrgFile", "Defacto2File", "ModarchiveModule",
-    "SixteenColorsPack", "BaseUrl",
+    "AmigascneFile",
+    "SceneOrgFile",
+    "ModlandFile",
+    "FujiologyFile",
+    "UntergrundFile",
+    "PaduaOrgFile",
+    "Defacto2File",
+    "ModarchiveModule",
+    "SixteenColorsPack",
+    "BaseUrl",
 ]
 URL_RANK = {cls: i for i, cls in enumerate(URL_PRIORITY)}
 
@@ -655,7 +695,13 @@ def resolve_url(link_class, parameter):
 # COPY-format parsing
 # ---------------------------------------------------------------------------
 _UNESCAPE = {
-    "\\": "\\", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+    "\\": "\\",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
 }
 
 
@@ -702,7 +748,7 @@ def load_database(sql_path, db_path):
         cur.execute(f"CREATE TABLE {table} ({', '.join(cols)})")
 
     remaining = dict(TABLES)  # tables we still need to find in the dump
-    current = None            # (table, [source col indices], cols)
+    current = None  # (table, [source col indices], cols)
     batch = []
     inserted = {t: 0 for t in TABLES}
 
@@ -710,9 +756,7 @@ def load_database(sql_path, db_path):
         if current and batch:
             table = current[0]
             placeholders = ", ".join("?" * len(current[2]))
-            cur.executemany(
-                f"INSERT INTO {table} VALUES ({placeholders})", batch
-            )
+            cur.executemany(f"INSERT INTO {table} VALUES ({placeholders})", batch)
             inserted[table] += len(batch)
         batch.clear()
 
@@ -722,9 +766,11 @@ def load_database(sql_path, db_path):
             if current is None:
                 if line.startswith("COPY public.") and remaining:
                     # Is this one of the tables we care about?
-                    name = line[len("COPY public."):line.index(" (")]
+                    name = line[len("COPY public.") : line.index(" (")]
                     if name in remaining:
-                        all_cols = line[line.index("(") + 1:line.index(")")].split(", ")
+                        all_cols = line[line.index("(") + 1 : line.index(")")].split(
+                            ", "
+                        )
                         wanted = TABLES[name]
                         idx = [all_cols.index(c) for c in wanted]
                         current = (name, idx, wanted)
@@ -753,8 +799,10 @@ def load_database(sql_path, db_path):
     for t, n in inserted.items():
         print(f"  {n:>8} {t}", file=sys.stderr)
     if remaining:
-        print(f"  WARNING: tables not found in dump: {', '.join(remaining)}",
-              file=sys.stderr)
+        print(
+            f"  WARNING: tables not found in dump: {', '.join(remaining)}",
+            file=sys.stderr,
+        )
 
     build_indexes(cur)
     conn.commit()
@@ -809,12 +857,13 @@ def scalar_maps(cur):
     nick_name = {}
     nick_releaser = {}
     for nid, rel, name in cur.execute(
-            "SELECT id, releaser_id, name FROM demoscene_nick"):
+        "SELECT id, releaser_id, name FROM demoscene_nick"
+    ):
         nick_name[nid] = name
         nick_releaser[nid] = rel
     is_group = {}
     for rid, g in cur.execute("SELECT id, is_group FROM demoscene_releaser"):
-        is_group[rid] = (g == "t")
+        is_group[rid] = g == "t"
     ptype_name = {}
     for pid, name in cur.execute("SELECT id, name FROM productions_productiontype"):
         ptype_name[pid] = name
@@ -829,8 +878,15 @@ def scalar_maps(cur):
     tag_name = {}
     for tid, name in cur.execute("SELECT id, name FROM taggit_tag"):
         tag_name[tid] = name
-    return (nick_name, nick_releaser, is_group, ptype_name, platform_name,
-            party_name, tag_name)
+    return (
+        nick_name,
+        nick_releaser,
+        is_group,
+        ptype_name,
+        platform_name,
+        party_name,
+        tag_name,
+    )
 
 
 def group_multimap(cur, table, key_col, val_col):
@@ -841,6 +897,79 @@ def group_multimap(cur, table, key_col, val_col):
     return d
 
 
+def platform_stats(cur, exported=None):
+    """Print a release count per platform, marking the whitelisted ones.
+
+    Printed on every run because the whitelist is easy to get silently wrong:
+    it is matched against the *demarc* name, so a PLATFORM_NAMES rename leaves
+    its pattern matching nothing (`Atari 8*` once `Atari 8 bit` became
+    `Atari XL`) and twelve thousand releases then disappear from the export
+    with no error anywhere.  A pattern matching no platform at all is reported
+    under the table; a whitelisted platform that exported nothing shows as a 0.
+
+    Counts are platform rows rather than productions -- a release listed for
+    two platforms is counted under both -- so they add up to more than the
+    number of lines written.  `exported`, when given, is the
+    {platform: lines written} tally export() kept as it wrote them.
+    """
+    stats = []
+    for dz_name, count in cur.execute(
+        "SELECT p.name, COUNT(*) FROM productions_production_platforms pp "
+        "JOIN platforms_platform p ON p.id = pp.platform_id "
+        "GROUP BY p.name"
+    ):
+        name = PLATFORM_NAMES.get(dz_name, dz_name)
+        stats.append(
+            (count, name, "" if dz_name == name else dz_name, platform_allowed(name))
+        )
+    if not stats:
+        print("Platforms: none in the database", file=sys.stderr)
+        return
+    stats.sort(key=lambda s: (-s[0], s[1]))
+
+    w1 = max(len(s[1]) for s in stats)
+    w2 = max(len(s[2]) for s in stats)
+    print(
+        "Platforms ('*' is whitelisted; a release on two platforms is "
+        "counted under both):",
+        file=sys.stderr,
+    )
+    print(
+        f"    {'demarc':<{w1}}  {'demozoo':<{w2}}  {'in dump':>8} {'exported':>8}",
+        file=sys.stderr,
+    )
+    for count, name, dz_name, ok in stats:
+        # Only the whitelisted ones can have been exported, so leave the
+        # column blank for the rest rather than printing a meaningless 0.
+        n_out = (
+            f"{exported.get(name, 0):>8}" if ok and exported is not None else " " * 8
+        )
+        print(
+            f"  {'*' if ok else ' '} {name:<{w1}}  {dz_name:<{w2}}  {count:>8} {n_out}",
+            file=sys.stderr,
+        )
+
+    total = sum(s[0] for s in stats)
+    listed = [s for s in stats if s[3]]
+    listed_total = sum(s[0] for s in listed)
+    print(
+        f"  {len(stats)} platforms, {total} platform rows; "
+        f"{len(listed)} whitelisted ({listed_total} rows, "
+        f"{100 * listed_total / total:.1f}%)",
+        file=sys.stderr,
+    )
+    dead = [
+        pat
+        for pat in PLATFORM_WHITELIST
+        if not any(fnmatchcase(s[1], pat) for s in stats)
+    ]
+    if dead:
+        print(
+            f"  WARNING: whitelist patterns matching no platform: {', '.join(dead)}",
+            file=sys.stderr,
+        )
+
+
 def export(conn, out_path, pouet_data=None, pouet_lookup=None):
     """Write the export.  `pouet_data` is the toplist map from load_pouetdata;
     `pouet_lookup` (--pouet-prods) replaces it with a per-prod callable that
@@ -848,18 +977,31 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
     play -- there is no falling back from one to the other."""
     pouet_lookup = pouet_lookup or (pouet_data or {}).get
     cur = conn.cursor()
-    (nick_name, nick_releaser, is_group, ptype_name,
-     platform_name, party_name, tag_name) = scalar_maps(cur)
+    (
+        nick_name,
+        nick_releaser,
+        is_group,
+        ptype_name,
+        platform_name,
+        party_name,
+        tag_name,
+    ) = scalar_maps(cur)
 
     author_nicks = group_multimap(
-        cur, "productions_production_author_nicks", "production_id", "nick_id")
+        cur, "productions_production_author_nicks", "production_id", "nick_id"
+    )
     affil_nicks = group_multimap(
-        cur, "productions_production_author_affiliation_nicks",
-        "production_id", "nick_id")
+        cur,
+        "productions_production_author_affiliation_nicks",
+        "production_id",
+        "nick_id",
+    )
     prod_types = group_multimap(
-        cur, "productions_production_types", "production_id", "productiontype_id")
+        cur, "productions_production_types", "production_id", "productiontype_id"
+    )
     prod_platforms = group_multimap(
-        cur, "productions_production_platforms", "production_id", "platform_id")
+        cur, "productions_production_platforms", "production_id", "platform_id"
+    )
 
     # production -> party name (via competition placing, else party_releases)
     comp_party = {}  # competition_id -> party_id
@@ -867,18 +1009,21 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
         comp_party[cid] = pid
     prod_party = {}
     for comp_id, prod_id in cur.execute(
-            "SELECT competition_id, production_id FROM parties_competitionplacing"):
+        "SELECT competition_id, production_id FROM parties_competitionplacing"
+    ):
         party_id = comp_party.get(comp_id)
         if party_id is not None:
             prod_party.setdefault(prod_id, party_id)
     for party_id, prod_id in cur.execute(
-            "SELECT party_id, production_id FROM parties_party_releases"):
+        "SELECT party_id, production_id FROM parties_party_releases"
+    ):
         prod_party.setdefault(prod_id, party_id)
 
     # production -> tags
     prod_tags = {}
     for tag_id, obj_id, ct in cur.execute(
-            "SELECT tag_id, object_id, content_type_id FROM taggit_taggeditem"):
+        "SELECT tag_id, object_id, content_type_id FROM taggit_taggeditem"
+    ):
         if ct == PRODUCTION_CONTENT_TYPE:
             prod_tags.setdefault(obj_id, []).append(tag_id)
 
@@ -974,12 +1119,13 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
         # A graphics entry is the work of the artist who drew it, so credit
         # them; demos and music keep the group byline.  An entry credited to
         # a group alone still falls back to that group.
-        if supertype == "graphics" or supertype == "music" :
+        if supertype == "graphics" or supertype == "music":
             return person_string(prod_id) or group_string(prod_id)
         return group_string(prod_id)
 
     n = 0
     n_pouet = 0
+    exported_platforms = {}  # platform -> lines written, for platform_stats()
     skipped_platform = 0
     skipped_download = 0
     skipped_tag = 0
@@ -995,24 +1141,28 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
         out.write("# Demozoo release database (https://demozoo.org/)\n")
         out.write("# puae_model:date hatari_machinetype:date\n")
         for prod_id, title, date, precision, supertype in cur.execute(
-                "SELECT id, title, release_date_date, release_date_precision, "
-                "supertype FROM productions_production ORDER BY id"):
-            tags = sorted(tag_name[t] for t in prod_tags.get(prod_id, [])
-                          if tag_name.get(t))
+            "SELECT id, title, release_date_date, release_date_precision, "
+            "supertype FROM productions_production ORDER BY id"
+        ):
+            tags = sorted(
+                tag_name[t] for t in prod_tags.get(prod_id, []) if tag_name.get(t)
+            )
             if any(t in TAG_BLACKLIST for t in tags):
                 skipped_tag += 1
                 continue
             raw_platforms = prod_platforms.get(prod_id, [])
-            platforms = [platform_name[p] for p in raw_platforms
-                         if p in platform_name]
+            platforms = [platform_name[p] for p in raw_platforms if p in platform_name]
             if not platforms:
                 # No platform *at all* is Demozoo not recording one (normal for
                 # graphics and music); a platform we filtered out is a machine
                 # we deliberately do not export, so that one still goes.  The
                 # url check keeps out the platformless entries demarc could not
                 # do anything with anyway.
-                if (raw_platforms or supertype not in PLATFORMLESS_SUPERTYPES
-                        or prod_id not in prod_urls):
+                if (
+                    raw_platforms
+                    or supertype not in PLATFORMLESS_SUPERTYPES
+                    or prod_id not in prod_urls
+                ):
                     skipped_platform += 1
                     continue
                 platformless += 1
@@ -1026,10 +1176,14 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
                 ("date", fmt_date(date, precision)),
                 ("party", party_name.get(prod_party.get(prod_id), "") or ""),
                 ("platform", ";".join(platforms)),
-                ("category", ";".join(
-                    ptype_name.get(t, "") for t in prod_types.get(prod_id, [])
-                    if ptype_name.get(t)
-                )),
+                (
+                    "category",
+                    ";".join(
+                        ptype_name.get(t, "")
+                        for t in prod_types.get(prod_id, [])
+                        if ptype_name.get(t)
+                    ),
+                ),
                 ("tags", ";".join(tags)),
                 ("download", prod_urls.get(prod_id, "")),
                 ("dlname", prod_dlnames.get(prod_id, "")),
@@ -1043,6 +1197,8 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
                 n_pouet += 1
             out.write("\t".join(f"{key}:{clean(val)}" for key, val in fields) + "\n")
             n += 1
+            for p in platforms:
+                exported_platforms[p] = exported_platforms.get(p, 0) + 1
 
     if n == 0:
         os.remove(tmp_path)
@@ -1054,47 +1210,81 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
         )
     os.replace(tmp_path, out_path)
 
-    print(f"Wrote {n} releases to {out_path} "
-          f"({platformless} of them without a platform, "
-          f"{n_pouet} with pouet data; skipped "
-          f"{skipped_platform} off-whitelist platforms, "
-          f"{skipped_download} without a usable download, "
-          f"{skipped_tag} blacklisted tags)", file=sys.stderr)
+    platform_stats(cur, exported_platforms)
+    print(
+        f"Wrote {n} releases to {out_path} "
+        f"({platformless} of them without a platform, "
+        f"{n_pouet} with pouet data; skipped "
+        f"{skipped_platform} off-whitelist platforms, "
+        f"{skipped_download} without a usable download, "
+        f"{skipped_tag} blacklisted tags)",
+        file=sys.stderr,
+    )
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sql", default="demozoo-export.sql",
-                    help="Demozoo PostgreSQL dump (default: demozoo-export.sql)")
-    ap.add_argument("--db", default="demozoo.sqlite",
-                    help="SQLite database to build/use (default: demozoo.sqlite)")
-    ap.add_argument("--out", default="demozoo.txt",
-                    help="output file (default: demozoo.txt)")
-    ap.add_argument("--skip-load", action="store_true",
-                    help="reuse an existing --db instead of rebuilding it")
-    ap.add_argument("--pouet-cache", default=POUET_CACHE_DIR,
-                    help=f"where toplist pages are cached "
-                         f"(default: {POUET_CACHE_DIR})")
-    ap.add_argument("--pouet-prods", action="store_true",
-                    help="look each exported release up in pouet's data dump "
-                         "or, failing that, its prod API, instead of reading "
-                         "the toplists (covers every release with a pouet "
-                         "link, not just the toplisted ones)")
-    ap.add_argument("--pouet-prod-cache", default=pouet.CACHE_DIR,
-                    help=f"where --pouet-prods caches API responses "
-                         f"(default: {pouet.CACHE_DIR})")
-    ap.add_argument("--pouet-limit", type=int, default=0, metavar="N",
-                    help="stop after N --pouet-prods fetches (0: no limit); "
-                         "cached pages do not count, so a trial run stays "
-                         "short and a later run picks up where it left off")
-    ap.add_argument("--pouet-delay", type=float, default=POUET_PROD_DELAY,
-                    help=f"seconds between --pouet-prods fetches "
-                         f"(default: {POUET_PROD_DELAY})")
-    ap.add_argument("--refresh-pouet", action="store_true",
-                    help="refetch the pouet pages instead of using the cache")
-    ap.add_argument("--no-pouet", action="store_true",
-                    help="skip pouet entirely (no pouet: field)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--sql",
+        default="demozoo-export.sql",
+        help="Demozoo PostgreSQL dump (default: demozoo-export.sql)",
+    )
+    ap.add_argument(
+        "--db",
+        default="demozoo.sqlite",
+        help="SQLite database to build/use (default: demozoo.sqlite)",
+    )
+    ap.add_argument(
+        "--out", default="demozoo.txt", help="output file (default: demozoo.txt)"
+    )
+    ap.add_argument(
+        "--skip-load",
+        action="store_true",
+        help="reuse an existing --db instead of rebuilding it",
+    )
+    ap.add_argument(
+        "--pouet-cache",
+        default=POUET_CACHE_DIR,
+        help=f"where toplist pages are cached (default: {POUET_CACHE_DIR})",
+    )
+    ap.add_argument(
+        "--pouet-prods",
+        action="store_true",
+        help="look each exported release up in pouet's data dump "
+        "or, failing that, its prod API, instead of reading "
+        "the toplists (covers every release with a pouet "
+        "link, not just the toplisted ones)",
+    )
+    ap.add_argument(
+        "--pouet-prod-cache",
+        default=pouet.CACHE_DIR,
+        help=f"where --pouet-prods caches API responses (default: {pouet.CACHE_DIR})",
+    )
+    ap.add_argument(
+        "--pouet-limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="stop after N --pouet-prods fetches (0: no limit); "
+        "cached pages do not count, so a trial run stays "
+        "short and a later run picks up where it left off",
+    )
+    ap.add_argument(
+        "--pouet-delay",
+        type=float,
+        default=POUET_PROD_DELAY,
+        help=f"seconds between --pouet-prods fetches (default: {POUET_PROD_DELAY})",
+    )
+    ap.add_argument(
+        "--refresh-pouet",
+        action="store_true",
+        help="refetch the pouet pages instead of using the cache",
+    )
+    ap.add_argument(
+        "--no-pouet", action="store_true", help="skip pouet entirely (no pouet: field)"
+    )
     args = ap.parse_args(argv)
 
     # One source or the other, never both: --pouet-prods covers every linked
@@ -1104,8 +1294,11 @@ def main(argv=None):
         pass
     elif args.pouet_prods:
         pouet_lookup = pouet_prod_lookup(
-            args.pouet_prod_cache, args.refresh_pouet, args.pouet_delay,
-            args.pouet_limit)
+            args.pouet_prod_cache,
+            args.refresh_pouet,
+            args.pouet_delay,
+            args.pouet_limit,
+        )
     else:
         pouet_data = load_pouetdata(args.pouet_cache, args.refresh_pouet)
 
