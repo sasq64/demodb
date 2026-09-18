@@ -92,15 +92,11 @@ TABLES = {
     "parties_party_releases": ["party_id", "production_id"],
     "parties_party": ["id", "name"],
     "productions_productionlink": [
-<<<<<<< HEAD
-        "production_id", "link_class", "parameter", "is_download_link",
-        "description",
-=======
         "production_id",
         "link_class",
         "parameter",
         "is_download_link",
->>>>>>> 2fa2fbd (Added PSP to demozoo)
+        "description",
     ],
     "taggit_tag": ["id", "name"],
     "taggit_taggeditem": ["tag_id", "object_id", "content_type_id"],
@@ -1033,8 +1029,9 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
     prod_links = {}
     prod_pouet_id = {}  # production -> the pouet prod it is linked to
     for prod_id, link_class, parameter, is_dl, description in cur.execute(
-            "SELECT production_id, link_class, parameter, is_download_link, "
-            "description FROM productions_productionlink"):
+        "SELECT production_id, link_class, parameter, is_download_link, "
+        "description FROM productions_productionlink"
+    ):
         # The external half of the table is pages *about* the release; the one
         # we keep is the Pouet link, whose parameter is the pouet prod id and
         # so is what ties a production to its toplist row.
