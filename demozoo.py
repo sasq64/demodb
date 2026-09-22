@@ -9,9 +9,10 @@ one bitworld.txt and csdb.txt use:
 Demozoo covers every platform, so unlike the single-platform bitworld.txt and
 csdb.txt there is no `# Platform:` header — each line names its own platform.
 Only the platforms in PLATFORM_WHITELIST are exported; releases carrying a
-blacklisted tag (see TAG_BLACKLIST) are dropped, as are downloads with a
-blacklisted extension (see DOWNLOAD_BLACKLIST) or a url demarc cannot read back
-(see url_usable) -- and with them any release left without a download.
+blacklisted tag (see TAG_BLACKLIST) or a blacklisted production type (see
+CATEGORY_BLACKLIST) are dropped, as are downloads with a blacklisted extension
+(see DOWNLOAD_BLACKLIST) or a url demarc cannot read back (see url_usable) --
+and with them any release left without a download.
 Graphics and music for which Demozoo records no platform at all are still
 exported, with an empty platform field (see PLATFORMLESS_SUPERTYPES).
 
@@ -424,6 +425,13 @@ PLATFORMLESS_SUPERTYPES = {"graphics", "music"}
 # Demozoo tags that mean "there is nothing here demarc can run": a release
 # carrying any of these is dropped whatever its downloads look like.
 TAG_BLACKLIST = {"no-binary", "no-binaries"}
+
+# Demozoo production types demarc has no business launching: a game or a tool
+# is not a release to watch, and a video is a recording of one rather than the
+# thing itself.  Matched against the type names exactly as Demozoo spells them
+# (the `category:` field); a release carrying any of them is dropped, even when
+# it also carries a type we do want.
+CATEGORY_BLACKLIST = {"Game", "Tool", "Video"}
 
 DOWNLOAD_BLACKLIST = [
     "*.php",
@@ -1126,6 +1134,7 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
     skipped_platform = 0
     skipped_download = 0
     skipped_tag = 0
+    skipped_category = 0
     platformless = 0
     # Same reasoning as the db: write beside out_path and rename, so a run that
     # produces nothing (an empty or truncated db read back with --skip-load)
@@ -1146,6 +1155,12 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
             )
             if any(t in TAG_BLACKLIST for t in tags):
                 skipped_tag += 1
+                continue
+            categories = [
+                ptype_name[t] for t in prod_types.get(prod_id, []) if ptype_name.get(t)
+            ]
+            if any(c in CATEGORY_BLACKLIST for c in categories):
+                skipped_category += 1
                 continue
             raw_platforms = prod_platforms.get(prod_id, [])
             platforms = [platform_name[p] for p in raw_platforms if p in platform_name]
@@ -1173,14 +1188,7 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
                 ("date", fmt_date(date, precision)),
                 ("party", party_name.get(prod_party.get(prod_id), "") or ""),
                 ("platform", ";".join(platforms)),
-                (
-                    "category",
-                    ";".join(
-                        ptype_name.get(t, "")
-                        for t in prod_types.get(prod_id, [])
-                        if ptype_name.get(t)
-                    ),
-                ),
+                ("category", ";".join(categories)),
                 ("tags", ";".join(tags)),
                 ("download", prod_urls.get(prod_id, "")),
                 ("dlname", prod_dlnames.get(prod_id, "")),
@@ -1201,9 +1209,10 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
         os.remove(tmp_path)
         raise SystemExit(
             f"error: no releases to export -- {skipped_platform} productions "
-            f"were off-whitelist, {skipped_download} had no usable download "
-            f"and {skipped_tag} carried a blacklisted tag.  If all counts are "
-            f"zero the database is empty; rebuild it without --skip-load."
+            f"were off-whitelist, {skipped_download} had no usable download, "
+            f"{skipped_tag} carried a blacklisted tag and {skipped_category} a "
+            f"blacklisted production type.  If all counts are zero the "
+            f"database is empty; rebuild it without --skip-load."
         )
     os.replace(tmp_path, out_path)
 
@@ -1214,7 +1223,8 @@ def export(conn, out_path, pouet_data=None, pouet_lookup=None):
         f"{n_pouet} with pouet data; skipped "
         f"{skipped_platform} off-whitelist platforms, "
         f"{skipped_download} without a usable download, "
-        f"{skipped_tag} blacklisted tags)",
+        f"{skipped_tag} blacklisted tags, "
+        f"{skipped_category} blacklisted categories)",
         file=sys.stderr,
     )
 
